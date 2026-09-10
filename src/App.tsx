@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { UserProgressState, UserProfile, Recommendation, RoadmapStage } from './types';
+import { UserProgressState, UserProfile, Recommendation, RoadmapStage, JourneyArchive } from './types';
 import {
   DEFAULT_PROFILE,
   DEFAULT_RECOMMENDATIONS,
@@ -15,6 +15,8 @@ import { ChallengeModal } from './components/ChallengeModal';
 import { DashboardView } from './components/DashboardView';
 import { AIMentorChat } from './components/AIMentorChat';
 import { Footer } from './components/Footer';
+import { StartFreshModal } from './components/StartFreshModal';
+import { SettingsProfileModal } from './components/SettingsProfileModal';
 
 const STORAGE_KEY = 'orbit_user_progress_v1';
 
@@ -59,18 +61,21 @@ export default function App() {
 
   const [activeChallengeRec, setActiveChallengeRec] = useState<Recommendation | null>(null);
   const [isMentorOpen, setIsMentorOpen] = useState<boolean>(false);
+  const [isStartFreshOpen, setIsStartFreshOpen] = useState<boolean>(false);
+  const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false);
 
   // Sync initial state from PostgreSQL on mount
   useEffect(() => {
     fetch('/api/user/state?userId=default-explorer')
       .then(res => res.json())
       .then(dbState => {
-        if (dbState && dbState.onboardingCompleted) {
+        if (dbState) {
           setUserState(prev => ({
             ...prev,
             ...dbState,
             resources: dbState.resources?.length ? dbState.resources : prev.resources,
             projects: dbState.projects?.length ? dbState.projects : prev.projects,
+            journeyHistory: dbState.journeyHistory || prev.journeyHistory || [],
           }));
           if (dbState.selectedDirection) {
             setCurrentView('dashboard');
@@ -321,27 +326,90 @@ export default function App() {
     reader.readAsText(file);
   };
 
-  // 8. Reset journey handler
-  const handleReset = () => {
-    if (confirm('Are you sure you want to start a fresh discovery? Your current progress will be reset.')) {
-      localStorage.removeItem(STORAGE_KEY);
-      setUserState({
-        onboardingCompleted: false,
-        profile: null,
-        recommendations: [],
-        selectedDirectionId: null,
-        selectedDirection: null,
-        completedChallengeIds: [],
-        challengeReflections: {},
-        roadmap: [],
-        resources: DEFAULT_RESOURCES,
-        projects: DEFAULT_PROJECTS,
-        completedTaskIds: [],
-        completedProjectIds: [],
-        recentActivities: [],
-      });
-      setCurrentView('landing');
+  // 8. Start Fresh Handler: Safely archives current journey to history, resets active session for new discovery
+  const handleStartFresh = async () => {
+    const currentSessionNum = userState.sessionNumber || (userState.journeyHistory?.length || 0) + 1;
+    const allTasks = userState.roadmap?.flatMap(s => s.tasks || []) || [];
+    let updatedHistory: JourneyArchive[] = [...(userState.journeyHistory || [])];
+
+    // Preserve the current journey if user had active progress
+    if (userState.onboardingCompleted || userState.selectedDirection) {
+      const archivedJourney: JourneyArchive = {
+        id: `journey-${Date.now()}-${currentSessionNum}`,
+        sessionNumber: currentSessionNum,
+        directionName:
+          userState.selectedDirection?.directionName ||
+          userState.profile?.headline ||
+          'Exploration Session',
+        tagline: userState.selectedDirection?.tagline,
+        headline: userState.profile?.headline,
+        profile: userState.profile,
+        recommendations: userState.recommendations,
+        selectedDirection: userState.selectedDirection,
+        roadmap: userState.roadmap,
+        completedTaskIds: userState.completedTaskIds,
+        completedProjectIds: userState.completedProjectIds,
+        completedTasksCount: userState.completedTaskIds.length,
+        totalTasksCount: allTasks.length,
+        completedProjectsCount: userState.completedProjectIds.length,
+        reflections: userState.challengeReflections,
+        archivedAt: new Date().toISOString(),
+        formattedDate: new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+      };
+      updatedHistory = [archivedJourney, ...updatedHistory];
     }
+
+    const nextSessionNum = currentSessionNum + 1;
+
+    // Call backend endpoint to safely persist to PostgreSQL
+    try {
+      const res = await fetch('/api/user/start-fresh', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId: 'default-explorer' }),
+      });
+      const data = await res.json();
+      if (data.journeyHistory && Array.isArray(data.journeyHistory)) {
+        updatedHistory = data.journeyHistory;
+      }
+    } catch (err) {
+      console.warn('Start-fresh server sync notice:', err);
+    }
+
+    // Reset active discovery session without deleting account or permanent logs
+    const newAct = {
+      id: `act-${Date.now()}`,
+      text: `Started fresh discovery (Journey #${nextSessionNum})`,
+      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+    };
+
+    const newState: UserProgressState = {
+      onboardingCompleted: false,
+      sessionNumber: nextSessionNum,
+      profile: null,
+      recommendations: [],
+      selectedDirectionId: null,
+      selectedDirection: null,
+      completedChallengeIds: [],
+      challengeReflections: {},
+      roadmap: [],
+      resources: DEFAULT_RESOURCES,
+      projects: DEFAULT_PROJECTS,
+      completedTaskIds: [],
+      completedProjectIds: [],
+      recentActivities: [newAct, ...userState.recentActivities.slice(0, 14)],
+      journeyHistory: updatedHistory,
+    };
+
+    setUserState(newState);
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(newState));
+    setCurrentView('onboarding');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  // 9. Reset journey handler (legacy fallback)
+  const handleReset = () => {
+    setIsStartFreshOpen(true);
   };
 
   return (
@@ -355,6 +423,8 @@ export default function App() {
         onReset={handleReset}
         onExport={handleExport}
         onImport={handleImport}
+        onOpenSettings={() => setIsSettingsOpen(true)}
+        onOpenStartFresh={() => setIsStartFreshOpen(true)}
       />
 
       {/* Main Content Area based on current view */}
@@ -401,6 +471,7 @@ export default function App() {
             onToggleProject={handleToggleProject}
             onOpenMentor={() => setIsMentorOpen(true)}
             onChangeDirection={() => setCurrentView('recommendations')}
+            onStartFresh={() => setIsStartFreshOpen(true)}
           />
         )}
       </main>
@@ -421,11 +492,27 @@ export default function App() {
         userState={userState}
       />
 
+      {/* Start Fresh Confirmation Dialog */}
+      <StartFreshModal
+        isOpen={isStartFreshOpen}
+        onClose={() => setIsStartFreshOpen(false)}
+        onConfirm={handleStartFresh}
+        currentDirectionName={userState.selectedDirection?.directionName}
+      />
+
+      {/* Profile & Settings Modal with Safely Preserved Journey History */}
+      <SettingsProfileModal
+        isOpen={isSettingsOpen}
+        onClose={() => setIsSettingsOpen(false)}
+        userState={userState}
+        onOpenStartFresh={() => setIsStartFreshOpen(true)}
+      />
+
       {/* Mobile-First Bottom Navigation Bar */}
       <div className="md:hidden fixed bottom-0 left-0 right-0 z-30 bg-[#FAF8F5]/95 backdrop-blur-md border-t border-[#EAE5DE] px-4 py-2 flex items-center justify-around shadow-sm">
         <button
           onClick={() => setCurrentView('landing')}
-          className={`flex flex-col items-center gap-0.5 text-[11px] font-medium py-1 px-3 rounded-xl transition ${
+          className={`flex flex-col items-center gap-0.5 text-[11px] font-medium py-1 px-2.5 rounded-xl transition ${
             currentView === 'landing' ? 'text-[#111827] font-bold' : 'text-neutral-500'
           }`}
         >
@@ -440,7 +527,7 @@ export default function App() {
               setCurrentView('onboarding');
             }
           }}
-          className={`flex flex-col items-center gap-0.5 text-[11px] font-medium py-1 px-3 rounded-xl transition ${
+          className={`flex flex-col items-center gap-0.5 text-[11px] font-medium py-1 px-2.5 rounded-xl transition ${
             currentView === 'onboarding' || currentView === 'recommendations'
               ? 'text-[#111827] font-bold'
               : 'text-neutral-500'
@@ -452,7 +539,7 @@ export default function App() {
         {userState.selectedDirection && (
           <button
             onClick={() => setCurrentView('dashboard')}
-            className={`flex flex-col items-center gap-0.5 text-[11px] font-medium py-1 px-3 rounded-xl transition ${
+            className={`flex flex-col items-center gap-0.5 text-[11px] font-medium py-1 px-2.5 rounded-xl transition ${
               currentView === 'dashboard' ? 'text-[#111827] font-bold' : 'text-neutral-500'
             }`}
           >
@@ -461,8 +548,15 @@ export default function App() {
         )}
 
         <button
+          onClick={() => setIsSettingsOpen(true)}
+          className="flex flex-col items-center gap-0.5 text-[11px] font-medium py-1 px-2.5 rounded-xl text-neutral-600 hover:text-neutral-900 transition"
+        >
+          <span>Profile</span>
+        </button>
+
+        <button
           onClick={() => setIsMentorOpen(true)}
-          className="flex flex-col items-center gap-0.5 text-[11px] font-medium py-1 px-3 rounded-xl text-purple-700 font-semibold transition"
+          className="flex flex-col items-center gap-0.5 text-[11px] font-medium py-1 px-2.5 rounded-xl text-purple-700 font-semibold transition"
         >
           <span>AI Mentor</span>
         </button>

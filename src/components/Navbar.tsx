@@ -1,5 +1,18 @@
 import React, { useState, useEffect } from 'react';
-import { Compass, Sparkles, MessageSquare, RotateCcw, Download, Upload, Database, CheckCircle2, X, Menu } from 'lucide-react';
+import {
+  Compass,
+  Sparkles,
+  MessageSquare,
+  RotateCcw,
+  Download,
+  Upload,
+  Database,
+  CheckCircle2,
+  X,
+  Menu,
+  User,
+  Settings
+} from 'lucide-react';
 import { UserProgressState } from '../types';
 
 interface NavbarProps {
@@ -7,9 +20,11 @@ interface NavbarProps {
   setCurrentView: (view: 'landing' | 'onboarding' | 'recommendations' | 'dashboard') => void;
   userState: UserProgressState;
   onOpenMentor: () => void;
-  onReset: () => void;
+  onReset?: () => void;
   onExport: () => void;
   onImport: (e: React.ChangeEvent<HTMLInputElement>) => void;
+  onOpenSettings?: () => void;
+  onOpenStartFresh?: () => void;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -20,6 +35,8 @@ export const Navbar: React.FC<NavbarProps> = ({
   onReset,
   onExport,
   onImport,
+  onOpenSettings,
+  onOpenStartFresh,
 }) => {
   const fileInputRef = React.useRef<HTMLInputElement>(null);
   const [dbStatus, setDbStatus] = useState<any>(null);
@@ -127,6 +144,32 @@ export const Navbar: React.FC<NavbarProps> = ({
             <span className="sm:hidden">Mentor</span>
           </button>
 
+          {/* Profile & Settings Trigger */}
+          {onOpenSettings && (
+            <button
+              id="navbar-settings-btn"
+              onClick={onOpenSettings}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-white hover:bg-neutral-100 border border-[#E2DDD5] text-neutral-700 text-xs font-medium transition shadow-xs"
+              title="Profile & Settings"
+            >
+              <Settings className="w-3.5 h-3.5 text-neutral-600" />
+              <span className="hidden sm:inline">Settings</span>
+            </button>
+          )}
+
+          {/* Understated Start Fresh secondary action */}
+          {userState.onboardingCompleted && onOpenStartFresh && (
+            <button
+              id="navbar-start-fresh-btn"
+              onClick={onOpenStartFresh}
+              className="hidden lg:flex items-center gap-1 px-3 py-1.5 rounded-full bg-transparent hover:bg-black/5 text-neutral-500 hover:text-neutral-900 text-xs font-medium transition"
+              title="Start a new discovery journey with fresh eyes"
+            >
+              <Sparkles className="w-3 h-3 text-purple-600" />
+              <span>Start Fresh</span>
+            </button>
+          )}
+
           {/* Primary CTA (Pill Button) */}
           {!userState.onboardingCompleted ? (
             <button
@@ -203,6 +246,46 @@ export const Navbar: React.FC<NavbarProps> = ({
             </button>
           )}
 
+          {/* Profile & Settings (Mobile) */}
+          {onOpenSettings && (
+            <button
+              id="mobile-settings-btn"
+              onClick={() => {
+                onOpenSettings();
+                setMobileMenuOpen(false);
+              }}
+              className="w-full text-left py-2 px-3 rounded-lg hover:bg-[#F3EFEA] flex items-center justify-between text-neutral-800"
+            >
+              <div className="flex items-center gap-2">
+                <Settings className="w-4 h-4 text-neutral-600" />
+                <span>Profile &amp; Settings</span>
+              </div>
+              {userState.journeyHistory && userState.journeyHistory.length > 0 && (
+                <span className="text-[10px] bg-purple-50 text-purple-700 px-2 py-0.5 rounded-full font-mono">
+                  {userState.journeyHistory.length} archived
+                </span>
+              )}
+            </button>
+          )}
+
+          {/* Start Fresh (Mobile) */}
+          {userState.onboardingCompleted && onOpenStartFresh && (
+            <button
+              id="mobile-start-fresh-btn"
+              onClick={() => {
+                onOpenStartFresh();
+                setMobileMenuOpen(false);
+              }}
+              className="w-full text-left py-2 px-3 rounded-lg hover:bg-purple-50/50 text-neutral-700 flex items-center justify-between"
+            >
+              <div className="flex items-center gap-2">
+                <Sparkles className="w-4 h-4 text-purple-600" />
+                <span>Start Fresh</span>
+              </div>
+              <span className="text-[10px] text-neutral-400">Keep history safe</span>
+            </button>
+          )}
+
           <div className="pt-2 border-t border-[#EAE5DE] flex items-center justify-between text-xs text-neutral-500 px-3">
             <button
               onClick={() => {
@@ -223,8 +306,12 @@ export const Navbar: React.FC<NavbarProps> = ({
                 <button onClick={() => fileInputRef.current?.click()} title="Load backup" className="hover:text-neutral-900">
                   <Upload className="w-3.5 h-3.5" />
                 </button>
-                <button onClick={onReset} title="Reset exploration" className="hover:text-red-600">
-                  <RotateCcw className="w-3.5 h-3.5" />
+                <button
+                  onClick={onOpenStartFresh || onReset}
+                  title="Start Fresh (archive current path)"
+                  className="hover:text-purple-600"
+                >
+                  <Sparkles className="w-3.5 h-3.5 text-neutral-500 hover:text-purple-600" />
                 </button>
               </div>
             )}

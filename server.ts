@@ -14,8 +14,17 @@ import {
   saveMentorMessage,
   getMentorHistory,
   loadFullUserState,
-  logProgress
+  logProgress,
+  startFreshJourney,
+  getJourneyHistory
 } from "./server/db";
+
+import {
+  callAIModel,
+  extractCleanJson,
+  synthesizeRecommendationsFallback,
+  synthesizeRoadmapFallback
+} from "./server/ai";
 
 dotenv.config();
 
@@ -26,26 +35,20 @@ app.use(express.json({ limit: "2mb" }));
 
 // Server-side environment configuration
 const NVIDIA_API_KEY = process.env.NVIDIA_API_KEY || "";
-const NVIDIA_BASE_URL = process.env.NVIDIA_BASE_URL || "https://integrate.api.nvidia.com/v1";
-const NVIDIA_MODEL = process.env.NVIDIA_MODEL || "openai/gpt-oss-20b";
-
-function getOpenAIClient(): OpenAI | null {
-  if (!NVIDIA_API_KEY) {
-    return null;
-  }
-  return new OpenAI({
-    apiKey: NVIDIA_API_KEY,
-    baseURL: NVIDIA_BASE_URL,
-  });
-}
+const NVIDIA_MODEL = process.env.NVIDIA_MODEL || "meta/llama-3.2-11b-vision-instruct";
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
 
 // Health check route
 app.get("/api/health", async (_req, res) => {
   const dbStatus = await getDbStatus();
   res.json({
     status: "ok",
-    model: NVIDIA_MODEL,
-    hasApiKey: Boolean(NVIDIA_API_KEY && NVIDIA_API_KEY.length > 5),
+    models: {
+      nvidia: NVIDIA_MODEL,
+      nvidiaActive: Boolean(NVIDIA_API_KEY && NVIDIA_API_KEY.length > 5),
+      gemini: "gemini-3.8-flash",
+      geminiActive: Boolean(GEMINI_API_KEY && GEMINI_API_KEY.length > 5),
+    },
     database: {
       connected: dbStatus.connected,
       engine: dbStatus.engine,
@@ -158,30 +161,28 @@ app.get("/api/user/chat-history", async (req, res) => {
   }
 });
 
-// Helper to clean JSON string from LLM responses
-function extractCleanJson(text: string): any {
+// START FRESH: Safely archive current journey, preserve history & reset active session
+app.post("/api/user/start-fresh", async (req, res) => {
   try {
-    return JSON.parse(text);
-  } catch {
-    // Attempt markdown code fence extraction
-    const match = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
-    if (match && match[1]) {
-      try {
-        return JSON.parse(match[1]);
-      } catch (innerErr) {
-        console.error("Failed to parse extracted code block JSON:", innerErr);
-      }
-    }
-    // Attempt greedy object/array extraction
-    const firstBrace = text.indexOf("{");
-    const lastBrace = text.lastIndexOf("}");
-    if (firstBrace !== -1 && lastBrace > firstBrace) {
-      const slice = text.substring(firstBrace, lastBrace + 1);
-      return JSON.parse(slice);
-    }
-    throw new Error("Unable to parse JSON from AI response");
+    const userId = req.body.userId || "default-explorer";
+    const result = await startFreshJourney(userId);
+    res.json(result);
+  } catch (err: any) {
+    console.error("Error in /api/user/start-fresh:", err);
+    res.status(500).json({ error: "Failed to start fresh journey" });
   }
-}
+});
+
+// Fetch historical journeys
+app.get("/api/user/journey-history", async (req, res) => {
+  try {
+    const userId = (req.query.userId as string) || "default-explorer";
+    const history = await getJourneyHistory(userId);
+    res.json({ journeys: history });
+  } catch (err: any) {
+    res.status(500).json({ error: "Failed to fetch journey history" });
+  }
+});
 
 // 1. AI Chat Route for Mentor & Interactive Guide
 app.post("/api/ai/chat", async (req, res) => {
@@ -191,12 +192,8 @@ app.post("/api/ai/chat", async (req, res) => {
       return res.status(400).json({ error: "Messages array is required." });
     }
 
-    const client = getOpenAIClient();
-    if (!client) {
-      return res.status(503).json({
-        error: "NVIDIA_API_KEY is not configured on the server. Please provide it in your environment settings.",
-      });
-    }
+    const userId = req.body.userId || "default-explorer";
+    const lastUserMsg = messages[messages.length - 1]?.content || "";
 
     // Prepare system prompt with friendly ORBIT personality and user context
     let systemInstruction = `You are ORBIT's intelligent personal career and skill guide for students and young people.
@@ -206,33 +203,36 @@ Help users go from confused to understood, then explore, try, choose, learn, bui
 
 Personality:
 - Friendly, patient, encouraging, honest, concise, curious, and non-judgmental.
-- Speak in simple, natural, everyday language. Never use corporate jargon or buzzwords like "career trajectory", "competency matrix", "optimization", "skill taxonomy".
-- Never pretend to know the user better than you do. Never say "You are definitely meant to be...". Say "This could be worth exploring because...".
-- Keep answers practical, grounded, and bite-sized. Do not dump walls of text.
-- If the user is overwhelmed, break the next step into something tiny and achievable in 15 minutes.`;
+- Speak in simple, natural, everyday language. Never use corporate jargon or buzzwords.
+- Keep answers practical, grounded, and bite-sized (1-2 short paragraphs).
+- If the user is overwhelmed, break the next step into something tiny and achievable in 15 minutes.
+- CHANGING DIRECTION IS ALWAYS ALLOWED: If the user has started fresh or changed their mind, never anchor on old abandoned choices. Look at their current direction with fresh eyes!`;
 
     if (userContext) {
       systemInstruction += `\n\nUser Context:\n${JSON.stringify(userContext, null, 2)}`;
     }
 
-    const fullMessages = [
-      { role: "system" as const, content: systemInstruction },
-      ...messages.slice(-10), // keep last 10 messages for context
-    ];
+    const conversationText = messages
+      .slice(-6)
+      .map((m: any) => `${m.role === "user" ? "User" : "Mentor"}: ${m.content}`)
+      .join("\n\n");
 
-    const completion = await client.chat.completions.create({
-      model: NVIDIA_MODEL,
-      messages: fullMessages,
-      temperature: 0.7,
-      max_tokens: 2048,
-    });
-
-    const choice = completion.choices?.[0];
-    const aiMessage = choice?.message?.content || "I'm here to help you figure this out. What's on your mind?";
+    let aiMessage = "";
+    try {
+      aiMessage = await callAIModel({
+        systemPrompt: systemInstruction,
+        userPrompt: conversationText,
+        temperature: 0.6,
+        maxTokens: 1024,
+        timeoutMs: 6000,
+      });
+    } catch (aiErr: any) {
+      console.warn("[AI Chat] Fallback triggered:", aiErr?.message);
+      const chosenDir = userContext?.chosenDirection || "your path";
+      aiMessage = `I'm right here with you! When exploring ${chosenDir}, remember the most important rule: start tiny. Pick just one 15-minute concept or interactive test today. You don't need to know the next 5 years—just your next single step. What part feels most interesting to try?`;
+    }
 
     // Persist conversation turn in PostgreSQL ai_mentor_context table
-    const userId = req.body.userId || "default-explorer";
-    const lastUserMsg = messages[messages.length - 1]?.content;
     if (lastUserMsg) {
       saveMentorMessage(userId, "user", lastUserMsg, userContext?.currentStage).catch(e =>
         console.warn("Could not persist user chat message to DB:", e.message)
@@ -242,13 +242,11 @@ Personality:
       console.warn("Could not persist AI chat message to DB:", e.message)
     );
 
-    return res.json({
-      content: aiMessage,
-    });
+    return res.json({ content: aiMessage });
   } catch (error: any) {
     console.error("Error in /api/ai/chat:", error?.message || error);
-    return res.status(500).json({
-      error: "Something went wrong while talking to your AI guide. Let's try again.",
+    return res.json({
+      content: "I'm here to help you figure this out step-by-step. Pick one small project or skill you feel curious about today, and let's test it together!",
     });
   }
 });
@@ -261,47 +259,11 @@ app.post("/api/ai/generate-recommendations", async (req, res) => {
       return res.status(400).json({ error: "Onboarding answers are required." });
     }
 
-    const client = getOpenAIClient();
-    if (!client) {
-      return res.status(503).json({
-        error: "NVIDIA_API_KEY is not configured on the server. Please provide it in your environment settings.",
-      });
-    }
-
     const prompt = `You are ORBIT's career and skill discovery guide.
-A student or beginner just completed onboarding. Here are their honest answers:
+A student just completed onboarding with these answers:
 ${JSON.stringify(answers, null, 2)}
 
-Create:
-1. A structured user profile: "What seems to fit you" (simple, non-jargon, warm summary).
-2. EXACTLY 3 distinct, practical career / skill directions that naturally align with their curiosity and preferences.
-Do NOT give 20 careers. Exactly 3.
-3. For each direction, provide:
-   - directionName (clear, accessible name like 'Creative Frontend Development', 'Product UX & Interface Design', 'Data Analysis & Visual Storytelling')
-   - tagline (short, inspiring one-liner)
-   - simpleExplanation (what this really is in plain words a 16-year-old understands)
-   - whyItFitsYou (direct connection to what they said they like / dislike)
-   - dayInTheLife (3-4 bullet points of what people actually do)
-   - beginnerSkills (3-4 foundational things to learn first)
-   - whatYouCanTryToday (a specific quick action they can do in 10 minutes)
-   - futureOpportunities (3 real possibilities / paths)
-   - challenge: a practical "Try Before You Commit" challenge with:
-       title: string
-       scenario: string (a friendly realistic mini-task)
-       taskDescription: string
-       type: 'code' | 'design' | 'creative' | 'logic'
-       sampleGuidance: string (tips to complete it)
-   - comparison:
-       whatIsIt: string
-       whatWouldIDo: string
-       creativeFactor: string (e.g., 'High - designing visual feel')
-       problemSolving: string (e.g., 'Medium - debugging logic')
-       workingWithPeople: string (e.g., 'Medium - small team')
-       beginnerDifficulty: string (e.g., 'Gentle - fast visual rewards')
-       whatCanITryToday: string
-       whoMightEnjoy: string
-
-Respond ONLY in valid JSON matching this structure:
+Output strictly valid JSON with EXACTLY this schema:
 {
   "profile": {
     "headline": "string",
@@ -342,33 +304,40 @@ Respond ONLY in valid JSON matching this structure:
         "whatCanITryToday": "string",
         "whoMightEnjoy": "string"
       }
-    },
-    // exactly 2 more recommendations (total 3)
+    }
   ]
-}`;
+}
+Output strictly valid JSON only without markdown fences or preamble. Exactly 3 recommendations.`;
 
-    const completion = await client.chat.completions.create({
-      model: NVIDIA_MODEL,
-      messages: [
-        {
-          role: "system",
-          content: "You output strictly valid JSON without conversational preamble. Use simple, warm, supportive language with zero jargon.",
-        },
-        { role: "user", content: prompt },
-      ],
-      temperature: 0.7,
-      max_tokens: 4096,
-    });
+    let data: any = null;
+    try {
+      const rawText = await callAIModel({
+        systemPrompt: "You are ORBIT career discovery AI. You output strictly valid JSON matching the user's schema without preamble.",
+        userPrompt: prompt,
+        temperature: 0.3,
+        maxTokens: 3000,
+        timeoutMs: 3500,
+      });
+      data = extractCleanJson(rawText);
+      if (!data?.profile || !Array.isArray(data?.recommendations) || data.recommendations.length === 0) {
+        throw new Error("Missing required profile or recommendations array");
+      }
+    } catch (err: any) {
+      console.warn("[AI Recommendations] Using dynamic tailored fallback:", err?.message);
+      data = synthesizeRecommendationsFallback(answers);
+    }
 
-    const content = completion.choices?.[0]?.message?.content || "{}";
-    const data = extractCleanJson(content);
+    // Persist to PostgreSQL in background
+    const userId = req.body.userId || "default-explorer";
+    saveOnboardingData(userId, answers, data.profile, data.recommendations).catch(e =>
+      console.warn("Could not persist onboarding data to PostgreSQL:", e.message)
+    );
 
     return res.json(data);
   } catch (error: any) {
-    console.error("Error in /api/ai/generate-recommendations:", error?.message || error);
-    return res.status(500).json({
-      error: "Something went wrong while talking to your AI guide. Let's try again.",
-    });
+    console.error("Critical error in /api/ai/generate-recommendations:", error?.message || error);
+    const fallbackData = synthesizeRecommendationsFallback(req.body?.answers || {});
+    return res.json(fallbackData);
   }
 });
 
@@ -380,80 +349,79 @@ app.post("/api/ai/generate-roadmap", async (req, res) => {
       return res.status(400).json({ error: "Chosen direction is required." });
     }
 
-    const client = getOpenAIClient();
-    if (!client) {
-      return res.status(503).json({
-        error: "NVIDIA_API_KEY is not configured on the server. Please provide it in your environment settings.",
-      });
-    }
-
     const prompt = `Create a 7-stage personalized roadmap for a beginner learning: "${direction.directionName}".
-User background & strengths: ${JSON.stringify(profile || {}, null, 2)}
+User background: ${JSON.stringify(profile || {}, null, 2)}
 
-Structure MUST follow these exact 7 progressive stages:
-1. START HERE (orientation, zero pressure, setting up simple free tools)
-2. BASICS (core foundational concepts explained simply)
-3. FIRST PROJECT (a tiny win that works in 1-2 days)
-4. PRACTICE (building confidence with mini experiments)
-5. REAL PROJECTS (standalone portfolio pieces solving real needs)
-6. PORTFOLIO (showcasing your work to friends, clients, or employers)
-7. NEXT LEVEL (deepening skills, staying curious, choosing a specialization)
-
-For EACH stage include:
-- stageNumber (1 to 7)
-- stageKey: EXACTLY one of ['START HERE', 'BASICS', 'FIRST PROJECT', 'PRACTICE', 'REAL PROJECTS', 'PORTFOLIO', 'NEXT LEVEL']
-- title: clear stage name
-- subtitle: short welcoming focus
-- whatToLearn: 3-4 key concepts
-- whyItMatters: why this step is essential in plain language
-- whatToPractice: 2-3 exercises
-- whatToBuild: a tangible small milestone
-- whatSuccessLooksLike: how the user knows they are ready to move forward
-- whatToDoNext: immediate next action
-- tasks: 3 actionable checkbox items { id: string, text: string, done: false }
-
-Also provide:
-- resources: list of 6 curated learning resources, strictly categorized into 'free' or 'paid' (use real, well-known platforms like freeCodeCamp, MDN Web Docs, official tutorials, Coursera, YouTube documentation; DO NOT fabricate fake courses, fake prices, or fake credentials).
-- projects: 3 project-based learning items (1 Beginner, 1 Intermediate, 1 Advanced) with:
-    id: string
-    title: string
-    level: 'Beginner' | 'Intermediate' | 'Advanced'
-    objective: string
-    skillsPracticed: string[]
-    expectedOutput: string
-    difficulty: string
-    suggestedNextStep: string
-    completed: false
-
-Respond ONLY in valid JSON:
+Respond ONLY in valid JSON matching:
 {
-  "roadmap": [ ... 7 stages ... ],
-  "resources": [ ... 6 resources ... ],
-  "projects": [ ... 3 projects ... ]
+  "roadmap": [
+    {
+      "id": "stg-1",
+      "stageNumber": 1,
+      "stageKey": "START HERE",
+      "title": "string",
+      "subtitle": "string",
+      "whatToLearn": ["string"],
+      "whyItMatters": "string",
+      "whatToPractice": ["string"],
+      "whatToBuild": "string",
+      "whatSuccessLooksLike": "string",
+      "whatToDoNext": "string",
+      "tasks": [
+        { "id": "t1-1", "text": "string", "done": false }
+      ]
+    }
+  ],
+  "resources": [
+    {
+      "id": "res-1",
+      "title": "string",
+      "provider": "string",
+      "type": "free",
+      "format": "string",
+      "url": "https://example.com",
+      "description": "string",
+      "estimatedTime": "string"
+    }
+  ],
+  "projects": [
+    {
+      "id": "proj-1",
+      "title": "string",
+      "level": "Beginner",
+      "objective": "string",
+      "skillsPracticed": ["string"],
+      "expectedOutput": "string",
+      "difficulty": "string",
+      "suggestedNextStep": "string",
+      "completed": false
+    }
+  ]
 }`;
 
-    const completion = await client.chat.completions.create({
-      model: NVIDIA_MODEL,
-      messages: [
-        {
-          role: "system",
-          content: "You output strictly valid JSON without conversational preamble. Use simple, warm, supportive language with zero jargon.",
-        },
-        { role: "user", content: prompt },
-      ],
-      temperature: 0.7,
-      max_tokens: 4096,
-    });
-
-    const content = completion.choices?.[0]?.message?.content || "{}";
-    const data = extractCleanJson(content);
+    let data: any = null;
+    try {
+      const rawText = await callAIModel({
+        systemPrompt: "You are ORBIT curriculum planner. Output strictly valid JSON without conversational preamble.",
+        userPrompt: prompt,
+        temperature: 0.3,
+        maxTokens: 3500,
+        timeoutMs: 3500,
+      });
+      data = extractCleanJson(rawText);
+      if (!Array.isArray(data?.roadmap) || data.roadmap.length === 0) {
+        throw new Error("Missing roadmap array");
+      }
+    } catch (err: any) {
+      console.warn("[AI Roadmap] Using curated blueprint fallback:", err?.message);
+      data = synthesizeRoadmapFallback(direction, profile);
+    }
 
     return res.json(data);
   } catch (error: any) {
-    console.error("Error in /api/ai/generate-roadmap:", error?.message || error);
-    return res.status(500).json({
-      error: "Something went wrong while talking to your AI guide. Let's try again.",
-    });
+    console.error("Critical error in /api/ai/generate-roadmap:", error?.message || error);
+    const fallbackData = synthesizeRoadmapFallback(req.body?.direction, req.body?.profile);
+    return res.json(fallbackData);
   }
 });
 
@@ -462,48 +430,39 @@ app.post("/api/ai/challenge-feedback", async (req, res) => {
   try {
     const { direction, challengeTitle, userSubmission, reflection } = req.body;
 
-    const client = getOpenAIClient();
-    if (!client) {
-      return res.status(503).json({
-        error: "NVIDIA_API_KEY is not configured on the server. Please provide it in your environment settings.",
-      });
-    }
-
     const prompt = `A student just tried a practical challenge for: "${direction}".
 Challenge: "${challengeTitle}"
-User's submission / output: "${userSubmission || '(Completed the interactive test)'}"
+User's submission: "${userSubmission || '(Completed the interactive test)'}"
 User reflection:
 - Did they enjoy it? "${reflection?.enjoyed || 'Yes'}"
 - What felt easy? "${reflection?.easy || 'Getting started'}"
 - What felt frustrating? "${reflection?.frustrating || 'Minor debugging'}"
 
-Give a friendly, encouraging, thoughtful review (around 3 short paragraphs):
+Give a friendly, encouraging, thoughtful review (around 2-3 short paragraphs):
 1. Celebrate their attempt honestly and validate whatever they felt.
-2. Explain what their reaction reveals about whether this path fits them (e.g. if debugging was frustrating vs exciting, what that means).
+2. Explain what their reaction reveals about whether this path fits them.
 3. A zero-pressure next step to explore if they feel like continuing.
-
-Never say "You are destined for this". Say "This reaction shows that...".
 Respond in plain text.`;
 
-    const completion = await client.chat.completions.create({
-      model: NVIDIA_MODEL,
-      messages: [
-        {
-          role: "system",
-          content: "You are a warm, supportive, honest mentor for young people. Keep your tone uplifting and conversational.",
-        },
-        { role: "user", content: prompt },
-      ],
-      temperature: 0.7,
-      max_tokens: 1024,
-    });
+    let feedback = "";
+    try {
+      feedback = await callAIModel({
+        systemPrompt: "You are a warm, supportive, honest mentor for young people. Keep your tone uplifting and conversational.",
+        userPrompt: prompt,
+        temperature: 0.6,
+        maxTokens: 800,
+        timeoutMs: 6000,
+      });
+    } catch (err: any) {
+      console.warn("[AI Feedback] Using tailored reflection fallback:", err?.message);
+      feedback = `Great work trying out this practical test for ${direction}! You noticed that you ${reflection?.enjoyed ? reflection.enjoyed.toLowerCase() : 'enjoyed the challenge'} and that "${reflection?.easy || 'getting started'}" felt approachable. Taking 5 minutes to test an actual skill before committing months of study is exactly how clear directions are found. Whenever you feel ready, take your next step with zero pressure!`;
+    }
 
-    const feedback = completion.choices?.[0]?.message?.content || "Great job trying this out!";
     return res.json({ feedback });
   } catch (error: any) {
-    console.error("Error in /api/ai/challenge-feedback:", error?.message || error);
-    return res.status(500).json({
-      error: "Something went wrong while talking to your AI guide. Let's try again.",
+    console.error("Critical error in /api/ai/challenge-feedback:", error?.message || error);
+    return res.json({
+      feedback: "Great job completing this practical test! Your honest reaction is the best guide for what fits your natural instincts.",
     });
   }
 });

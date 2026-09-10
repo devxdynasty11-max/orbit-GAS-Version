@@ -22,6 +22,7 @@ interface DashboardViewProps {
   onToggleProject: (projectId: string) => void;
   onOpenMentor: () => void;
   onChangeDirection: () => void;
+  onStartFresh?: () => void;
 }
 
 export const DashboardView: React.FC<DashboardViewProps> = ({
@@ -30,6 +31,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   onToggleProject,
   onOpenMentor,
   onChangeDirection,
+  onStartFresh,
 }) => {
   const [activeTab, setActiveTab] = useState<'roadmap' | 'projects' | 'resources'>('roadmap');
   const [currentStageIdx, setCurrentStageIdx] = useState<number>(0);
@@ -102,13 +104,28 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           <span className="text-xs font-medium text-neutral-500">
             Good day 👋
           </span>
-          <button
-            onClick={onChangeDirection}
-            className="text-xs text-neutral-500 hover:text-neutral-900 transition flex items-center gap-1"
-          >
-            <RotateCcw className="w-3 h-3" />
-            <span>Switch path</span>
-          </button>
+          <div className="flex items-center gap-2.5">
+            <button
+              onClick={onChangeDirection}
+              className="text-xs text-neutral-500 hover:text-neutral-900 transition flex items-center gap-1"
+            >
+              <RotateCcw className="w-3 h-3" />
+              <span>Switch path</span>
+            </button>
+            {onStartFresh && (
+              <>
+                <span className="text-neutral-300">·</span>
+                <button
+                  id="header-start-fresh-btn"
+                  onClick={onStartFresh}
+                  className="text-xs text-neutral-400 hover:text-neutral-700 transition flex items-center gap-1"
+                >
+                  <Sparkles className="w-3 h-3 text-purple-600" />
+                  <span>Start Fresh</span>
+                </button>
+              </>
+            )}
+          </div>
         </div>
 
         <div>
@@ -399,6 +416,31 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               </a>
             ))}
           </div>
+        </div>
+      )}
+
+      {/* Subtle secondary action for starting fresh */}
+      {onStartFresh && (
+        <div
+          id="dashboard-start-fresh-section"
+          className="pt-8 mt-12 border-t border-[#EAE5DE] flex flex-col sm:flex-row sm:items-center justify-between gap-4 text-xs text-neutral-500"
+        >
+          <div className="space-y-0.5">
+            <p className="font-semibold text-neutral-700">
+              Changing your mind? That's completely okay.
+            </p>
+            <p className="text-neutral-500 text-[11px] leading-relaxed">
+              Start a new discovery journey and we'll look at your direction with fresh eyes. Your previous achievements stay safely saved in history.
+            </p>
+          </div>
+          <button
+            id="dashboard-footer-start-fresh-btn"
+            onClick={onStartFresh}
+            className="inline-flex items-center justify-center gap-1.5 px-4 py-2 rounded-full bg-white hover:bg-[#FAF8F5] border border-[#E2DDD5] text-neutral-700 hover:text-neutral-900 transition text-xs font-medium shrink-0 shadow-xs active:scale-98"
+          >
+            <Sparkles className="w-3.5 h-3.5 text-purple-600" />
+            <span>Start Fresh</span>
+          </button>
         </div>
       )}
     </div>

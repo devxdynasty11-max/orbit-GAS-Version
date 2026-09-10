@@ -146,6 +146,27 @@ CREATE TABLE IF NOT EXISTS ai_mentor_context (
   stage_context TEXT,
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
+
+CREATE TABLE IF NOT EXISTS journey_history (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  session_number INT NOT NULL DEFAULT 1,
+  direction_name TEXT NOT NULL,
+  tagline TEXT,
+  headline TEXT,
+  profile JSONB,
+  recommendations JSONB,
+  selected_direction JSONB,
+  roadmap JSONB,
+  completed_task_ids JSONB,
+  completed_project_ids JSONB,
+  completed_tasks_count INT DEFAULT 0,
+  total_tasks_count INT DEFAULT 0,
+  completed_projects_count INT DEFAULT 0,
+  reflections JSONB,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  archived_at TIMESTAMPTZ DEFAULT NOW()
+);
 `;
 
 /**
@@ -680,6 +701,16 @@ export async function loadFullUserState(userId: string) {
     [userId]
   );
   const completedChallengeIds = Array.from(new Set(reflections.map((r: any) => r.recommendation_id)));
+  const challengeReflections: Record<string, any> = {};
+  reflections.forEach((r: any) => {
+    challengeReflections[r.recommendation_id] = {
+      submission: r.user_submission,
+      enjoyed: r.enjoyed,
+      easy: r.easy,
+      frustrating: r.frustrating,
+      wouldPursue: r.would_pursue,
+    };
+  });
 
   // 7. Recent activity logs
   const activityRows = await dbQuery(
@@ -691,16 +722,157 @@ export async function loadFullUserState(userId: string) {
     [userId]
   );
 
+  // 8. Safely preserved Journey History
+  const journeyHistory = await getJourneyHistory(userId);
+  const sessionNumber = journeyHistory.length + 1;
+
   return {
     onboardingCompleted: !!profile,
+    sessionNumber,
     profile,
     recommendations,
     selectedDirectionId: selectedDirection?.id || null,
     selectedDirection,
     completedChallengeIds,
+    challengeReflections,
     roadmap,
     completedTaskIds,
     completedProjectIds,
     recentActivities: activityRows,
+    journeyHistory,
+  };
+}
+
+/**
+ * Fetch safely preserved journey archives from PostgreSQL
+ */
+export async function getJourneyHistory(userId: string) {
+  await ensureDbReady();
+  await ensureUser(userId);
+  const rows = await dbQuery(
+    `SELECT id, session_number as "sessionNumber", direction_name as "directionName",
+            tagline, headline, profile, recommendations, selected_direction as "selectedDirection",
+            roadmap, completed_task_ids as "completedTaskIds", completed_project_ids as "completedProjectIds",
+            completed_tasks_count as "completedTasksCount", total_tasks_count as "totalTasksCount",
+            completed_projects_count as "completedProjectsCount", reflections,
+            to_char(archived_at, 'Mon DD, YYYY') as "formattedDate", archived_at as "archivedAt"
+     FROM journey_history
+     WHERE user_id = $1
+     ORDER BY session_number DESC`,
+    [userId]
+  );
+  return rows.map((r: any) => ({
+    ...r,
+    profile: typeof r.profile === 'string' ? JSON.parse(r.profile) : r.profile,
+    recommendations: typeof r.recommendations === 'string' ? JSON.parse(r.recommendations) : r.recommendations,
+    selectedDirection: typeof r.selectedDirection === 'string' ? JSON.parse(r.selectedDirection) : r.selectedDirection,
+    roadmap: typeof r.roadmap === 'string' ? JSON.parse(r.roadmap) : r.roadmap,
+    completedTaskIds: typeof r.completedTaskIds === 'string' ? JSON.parse(r.completedTaskIds) : r.completedTaskIds,
+    completedProjectIds: typeof r.completedProjectIds === 'string' ? JSON.parse(r.completedProjectIds) : r.completedProjectIds,
+    reflections: typeof r.reflections === 'string' ? JSON.parse(r.reflections) : r.reflections,
+  }));
+}
+
+/**
+ * Execute Start Fresh:
+ * - Safely archives current journey to journey_history with timestamps & completed metrics
+ * - Preserves user account, completed projects log, and activity history
+ * - Clears active session so user begins fresh discovery with zero bias
+ */
+export async function startFreshJourney(userId: string) {
+  await ensureDbReady();
+  await ensureUser(userId);
+
+  // 1. Fetch current active state to archive
+  const currentState = await loadFullUserState(userId);
+
+  const existingJourneys = await dbQuery(
+    `SELECT COUNT(*) as count FROM journey_history WHERE user_id = $1`,
+    [userId]
+  );
+  const sessionNumber = parseInt(existingJourneys[0]?.count || '0', 10) + 1;
+
+  let archivedJourney: any = null;
+
+  // If user completed onboarding or picked a direction, safely preserve it in history
+  if (currentState.onboardingCompleted || currentState.selectedDirection) {
+    const archiveId = `journey-${Date.now()}-${sessionNumber}`;
+    const allTasks = currentState.roadmap?.flatMap((s: any) => s.tasks || []) || [];
+    const completedTasksCount = currentState.completedTaskIds?.length || 0;
+    const completedProjectsCount = currentState.completedProjectIds?.length || 0;
+
+    const dirName =
+      currentState.selectedDirection?.directionName ||
+      currentState.profile?.headline ||
+      'Exploration Session';
+
+    await dbQuery(
+      `INSERT INTO journey_history (
+        id, user_id, session_number, direction_name, tagline, headline,
+        profile, recommendations, selected_direction, roadmap,
+        completed_task_ids, completed_project_ids, completed_tasks_count,
+        total_tasks_count, completed_projects_count, reflections, archived_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, NOW())`,
+      [
+        archiveId,
+        userId,
+        sessionNumber,
+        dirName,
+        currentState.selectedDirection?.tagline || '',
+        currentState.profile?.headline || 'Explorer Profile',
+        JSON.stringify(currentState.profile || {}),
+        JSON.stringify(currentState.recommendations || []),
+        JSON.stringify(currentState.selectedDirection || {}),
+        JSON.stringify(currentState.roadmap || []),
+        JSON.stringify(currentState.completedTaskIds || []),
+        JSON.stringify(currentState.completedProjectIds || []),
+        completedTasksCount,
+        allTasks.length,
+        completedProjectsCount,
+        JSON.stringify(currentState.challengeReflections || {}),
+      ]
+    );
+
+    archivedJourney = {
+      id: archiveId,
+      sessionNumber,
+      directionName: dirName,
+      headline: currentState.profile?.headline || 'Explorer Profile',
+      completedTasksCount,
+      totalTasksCount: allTasks.length,
+      completedProjectsCount,
+      archivedAt: new Date().toISOString(),
+      formattedDate: new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+    };
+  }
+
+  // 2. Clear current active state from tables WITHOUT deleting the user or history
+  await dbQuery('DELETE FROM selected_paths WHERE user_id = $1', [userId]);
+  await dbQuery('DELETE FROM roadmap_tasks WHERE user_id = $1', [userId]);
+  await dbQuery('DELETE FROM roadmaps WHERE user_id = $1', [userId]);
+  await dbQuery('DELETE FROM recommendations WHERE user_id = $1', [userId]);
+  await dbQuery('DELETE FROM ai_profiles WHERE user_id = $1', [userId]);
+
+  // Tag mentor context with a reset notice so the AI looks with fresh eyes
+  await dbQuery(
+    `INSERT INTO ai_mentor_context (id, user_id, role, content, stage_context)
+     VALUES ($1, $2, 'system', 'User started fresh for Journey #${sessionNumber + 1}. Treat new answers as primary context with zero bias from old choices.', 'start_fresh')`,
+    [`sys-${Date.now()}`, userId]
+  );
+
+  // 3. Log progress
+  await logProgress(
+    userId,
+    'started_fresh',
+    `Started fresh discovery journey #${sessionNumber + 1}. Previous journey safely preserved in history.`
+  );
+
+  const updatedHistory = await getJourneyHistory(userId);
+
+  return {
+    success: true,
+    newSessionNumber: sessionNumber + 1,
+    archivedJourney,
+    journeyHistory: updatedHistory,
   };
 }

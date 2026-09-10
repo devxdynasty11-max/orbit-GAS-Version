@@ -103,8 +103,29 @@ export interface ChatMessage {
   timestamp: string;
 }
 
+export interface JourneyArchive {
+  id: string;
+  sessionNumber: number;
+  directionName: string;
+  tagline?: string;
+  headline?: string;
+  profile?: UserProfile | null;
+  recommendations?: Recommendation[];
+  selectedDirection?: Recommendation | null;
+  roadmap?: RoadmapStage[];
+  completedTaskIds?: string[];
+  completedProjectIds?: string[];
+  completedTasksCount?: number;
+  totalTasksCount?: number;
+  completedProjectsCount?: number;
+  reflections?: Record<string, any>;
+  archivedAt: string;
+  formattedDate?: string;
+}
+
 export interface UserProgressState {
   onboardingCompleted: boolean;
+  sessionNumber?: number;
   profile: UserProfile | null;
   recommendations: Recommendation[];
   selectedDirectionId: string | null;
@@ -123,4 +144,5 @@ export interface UserProgressState {
   completedTaskIds: string[];
   completedProjectIds: string[];
   recentActivities: { id: string; text: string; timestamp: string }[];
+  journeyHistory?: JourneyArchive[];
 }
