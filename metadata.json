@@ -1,0 +1,6 @@
+{
+  "name": "ORBIT",
+  "description": "AI-powered career and skill discovery platform for students and young people. Discover what you're naturally drawn to and find a direction worth trying.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
