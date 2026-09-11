@@ -259,90 +259,35 @@ export async function initDatabase(): Promise<DbStatus> {
 
   const rawUrl = process.env.DATABASE_URL;
   const dbUrl = cleanDatabaseUrl(rawUrl);
-  const isProd = isProductionEnvironment();
 
-  // ==========================================
-  // PRODUCTION ENVIRONMENT (Render / Production)
-  // ==========================================
-  if (isProd) {
-    // 1. Validate DATABASE_URL existence and completeness
-    if (!dbUrl || isPlaceholderDatabaseUrl(dbUrl)) {
-      console.error('================================================================');
-      console.error('[ORBIT Database] FATAL: DATABASE_URL is not configured for production!');
-      console.error('[ORBIT Database] Render deployment requires a remote PostgreSQL database (Supabase).');
-      console.error('[ORBIT Database] Local embedded PGlite is strictly disabled in production to prevent out-of-memory errors.');
-      console.error('[ORBIT Database] Please add your Supabase DATABASE_URL to Render Environment Variables.');
-      console.error('================================================================');
-      throw new Error(
-        '[ORBIT Database] FATAL: Missing or placeholder DATABASE_URL in production. Local embedded PGlite engine cannot be run on Render Free (512MB RAM limit).'
-      );
-    }
-
-    // 2. Connect to remote PostgreSQL
-    console.log('[ORBIT Database] Production environment detected.');
-    console.log('[ORBIT Database] Using remote PostgreSQL database (DATABASE_URL configured).');
-
-    try {
-      const pool = new Pool({
-        connectionString: dbUrl,
-        ssl: { rejectUnauthorized: false },
-        max: 5, // Low pool size to keep memory footprint minimal on Render 512MB limit
-        idleTimeoutMillis: 30000,
-        connectionTimeoutMillis: 10000,
-      });
-
-      // Quick ping test
-      await pool.query('SELECT 1 as test');
-      pgPool = pool;
-      activeEngine = 'remote_postgres';
-      console.log('[ORBIT Database] Connected to remote PostgreSQL successfully!');
-
-      // Run migrations on remote PostgreSQL
-      await pgPool.query(MIGRATION_SQL);
-      console.log('[ORBIT Database] All schemas and migrations verified on remote PostgreSQL!');
-
-      dbInitialized = true;
-      return getDbStatus();
-    } catch (err: any) {
-      console.error('================================================================');
-      console.error('[ORBIT Database] FATAL: Failed to connect to remote PostgreSQL database!');
-      console.error('[ORBIT Database] Error:', err.message);
-      console.error('[ORBIT Database] Verify that your Supabase database is active, reachable, and the password in DATABASE_URL is correct.');
-      console.error('[ORBIT Database] Embedded PGlite fallback is strictly forbidden in production.');
-      console.error('================================================================');
-      throw new Error(`[ORBIT Database] Remote PostgreSQL connection failed: ${err.message}`);
-    }
-  }
-
-  // ==========================================
-  // DEVELOPMENT ENVIRONMENT (Local Dev)
-  // ==========================================
-  // If valid remote DATABASE_URL is provided in dev, use it
+  // 1. If remote DATABASE_URL is provided, attempt connection
   if (dbUrl && !isPlaceholderDatabaseUrl(dbUrl)) {
     try {
-      console.log('[ORBIT Database] (Dev mode) Testing remote PostgreSQL connection via DATABASE_URL...');
+      console.log('[ORBIT Database] Testing remote PostgreSQL connection via DATABASE_URL...');
       const pool = new Pool({
         connectionString: dbUrl,
         ssl: { rejectUnauthorized: false },
+        max: 5,
+        idleTimeoutMillis: 30000,
         connectionTimeoutMillis: 8000,
       });
 
       await pool.query('SELECT 1 as test');
       pgPool = pool;
       activeEngine = 'remote_postgres';
-      console.log('[ORBIT Database] (Dev mode) Connected to remote PostgreSQL successfully!');
+      console.log('[ORBIT Database] Connected to remote PostgreSQL successfully!');
 
       await pgPool.query(MIGRATION_SQL);
-      console.log('[ORBIT Database] (Dev mode) Migrations applied successfully to remote PostgreSQL!');
+      console.log('[ORBIT Database] Migrations applied successfully to remote PostgreSQL!');
 
       dbInitialized = true;
       return getDbStatus();
     } catch (err: any) {
-      console.warn('[ORBIT Database] (Dev mode) Remote PostgreSQL connection failed, switching to local dev fallback:', err.message);
+      console.warn('[ORBIT Database] Remote PostgreSQL connection failed, falling back to embedded PostgreSQL:', err.message);
     }
   }
 
-  // Dev-only fallback: Dynamically load PGlite so it is NEVER required or loaded in production
+  // 2. Embedded PostgreSQL engine (PGlite) with filesystem or in-memory fallback
   try {
     const { PGlite } = await import('@electric-sql/pglite');
     const dataDir = path.join(process.cwd(), 'data', 'orbit_pg');
@@ -353,7 +298,7 @@ export async function initDatabase(): Promise<DbStatus> {
       instance = new PGlite(dataDir);
       await instance.waitReady;
     } catch (persistentErr: any) {
-      console.warn('[ORBIT Database] (Dev mode) Clearing stale or corrupted PGlite directory and re-initializing at:', dataDir);
+      console.warn('[ORBIT Database] Clearing stale PGlite directory and re-initializing at:', dataDir);
       try {
         if (instance && typeof instance.close === 'function') {
           await instance.close().catch(() => {});
@@ -367,23 +312,33 @@ export async function initDatabase(): Promise<DbStatus> {
 
     pgliteDb = instance;
     activeEngine = 'embedded_postgres';
-    console.log('[ORBIT Database] (Dev mode) Initialized local embedded PostgreSQL engine at:', dataDir);
+    console.log('[ORBIT Database] Initialized embedded PostgreSQL engine at:', dataDir);
 
     await pgliteDb.exec(MIGRATION_SQL);
-    console.log('[ORBIT Database] (Dev mode) All migrations applied successfully to embedded PostgreSQL engine!');
+    console.log('[ORBIT Database] All migrations applied successfully to embedded PostgreSQL engine!');
 
     dbInitialized = true;
     return getDbStatus();
   } catch (err: any) {
-    console.warn('[ORBIT Database] (Dev mode) Using in-memory PostgreSQL engine for development session');
-    const { PGlite } = await import('@electric-sql/pglite');
-    pgliteDb = new PGlite();
-    await pgliteDb.waitReady;
-    activeEngine = 'embedded_postgres';
-    await pgliteDb.exec(MIGRATION_SQL);
-    console.log('[ORBIT Database] (Dev mode) Migrations applied to in-memory PostgreSQL engine!');
-    dbInitialized = true;
-    return getDbStatus();
+    console.warn('[ORBIT Database] Using in-memory PostgreSQL engine:', err?.message || err);
+    try {
+      const { PGlite } = await import('@electric-sql/pglite');
+      pgliteDb = new PGlite();
+      await pgliteDb.waitReady;
+      activeEngine = 'embedded_postgres';
+      await pgliteDb.exec(MIGRATION_SQL);
+      console.log('[ORBIT Database] Migrations applied to in-memory PostgreSQL engine!');
+      dbInitialized = true;
+      return getDbStatus();
+    } catch (inMemErr: any) {
+      console.error('[ORBIT Database] Could not initialize in-memory database:', inMemErr?.message || inMemErr);
+      return {
+        connected: false,
+        engine: activeEngine,
+        tables: [],
+        message: 'Database initialization failed; using fallback mode',
+      };
+    }
   }
 }
 

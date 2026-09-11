@@ -71,7 +71,7 @@ What would you like to explore today?`;
     : [
         'How do I discover my natural strengths?',
         'What careers match curious problem solvers?',
-        'I have no tech background—where do I start?',
+        'I have zero prior background—where do I start?',
         'Help me choose between two paths.',
       ];
 

@@ -37,7 +37,7 @@ import {
 dotenv.config();
 
 const app = express();
-const PORT = Number(process.env.PORT) || 3000;
+const PORT = 3000;
 
 app.use(express.json({ limit: "2mb" }));
 
@@ -54,7 +54,7 @@ app.get("/api/health", async (_req, res) => {
     models: {
       nvidia: NVIDIA_MODEL,
       nvidiaActive: Boolean(NVIDIA_API_KEY && NVIDIA_API_KEY.length > 5),
-      gemini: "gemini-3.8-flash",
+      gemini: "gemini-3.6-flash",
       geminiActive: Boolean(GEMINI_API_KEY && GEMINI_API_KEY.length > 5),
     },
     database: {
@@ -295,7 +295,7 @@ ${userName ? `- User's Name: ${userName} (speak naturally with them, use their n
 ${educationStage ? `- Current Background: ${educationStage}${fieldOfStudy ? ` (Field: ${fieldOfStudy})` : ""}` : ""}
 ${learningStyle ? `- Preferred Learning Style: ${learningStyle}` : ""}
 ${careerGoal ? `- Primary Career Target: ${careerGoal}` : ""}
-- Target Direction: ${chosenDirection} (${isRegulated ? "Regulated Profession with formal licensing/education requirements" : "Modern practical/tech/creative pathway"})
+- Target Direction: ${chosenDirection} (${isRegulated ? "Regulated Profession with statutory licensing/education requirements" : "Specialized professional & practical pathway"})
 - Current Active Stage: ${currentStage}
 - Completed Roadmap Milestones: ${completedCount} completed
 - Profile Snapshot: ${profileSummary || "Self-directed learner"}
@@ -308,7 +308,8 @@ Mentor Interaction Rules:
 3. Help the user reflect on their own tendencies and interests rather than prescribing a one-size-fits-all formula.
 4. End with at most ONE gentle, thoughtful follow-up question or a single 15-minute micro-step to keep momentum going without overwhelming them.
 5. If the user expresses confusion, imposter syndrome, or uncertainty, validate their feeling first and ground them in their next immediate action.
-6. If the path is a regulated profession (Medicine, Law, Aviation, Civil Engineering, CPA), clearly distinguish formal academic/licensing checkpoints from self-study tips.`;
+6. If the path is a regulated profession (Medicine, Law, Aviation, Civil Engineering, CPA), clearly distinguish formal academic/licensing checkpoints from self-study tips.
+7. ORBIT is a truly field-agnostic platform spanning Healthcare, Business, Design, Law, Sciences, Psychology, Education, Trades, and Technology. NEVER assume or force coding, GitHub, tech jargon, or software tools unless the user's specific field or explicit question is in computing or technology.`;
 
     // Filter messages for chat
     const chatSequence = messages
@@ -479,7 +480,7 @@ Output strictly valid JSON only:
     return res.json(data);
   } catch (error: any) {
     console.error("Critical error in /api/ai/generate-career-pathway:", error?.message || error);
-    const fallback = synthesizeCareerPathwayFallback(req.body?.careerGoal || "Software Engineer", req.body?.profile);
+    const fallback = synthesizeCareerPathwayFallback(req.body?.careerGoal || "Career Explorer", req.body?.profile);
     return res.json(fallback);
   }
 });
@@ -493,8 +494,18 @@ app.post("/api/ai/generate-recommendations", async (req, res) => {
     }
 
     const prompt = `You are ORBIT's career and skill discovery guide.
-A student just completed onboarding with these answers:
+ORBIT is a truly field-agnostic platform spanning Healthcare, Business, Design, Law, Psychology, Education, Media & Journalism, Sciences, Skilled Crafts, and Technology.
+Analyze the student's authentic answers:
 ${JSON.stringify(answers, null, 2)}
+
+GUIDELINES:
+- Recommend 3 diverse, genuinely fitting directions that reflect their actual interests.
+- If they prefer working with people or helping, suggest Psychology, Healthcare, Education, or People Operations.
+- If they enjoy writing, storytelling, or analysis, suggest Journalism, Content Strategy, or Policy.
+- If they enjoy visual aesthetics and layout, suggest UI/UX or Brand Design.
+- If they enjoy numbers and strategy, suggest Finance, Product Strategy, or Operations.
+- Only suggest coding/software engineering if their answers explicitly state an appetite for computer programming.
+- DO NOT default to tech or AI careers unless requested.
 
 Output strictly valid JSON with EXACTLY this schema:
 {
@@ -523,8 +534,8 @@ Output strictly valid JSON with EXACTLY this schema:
         "title": "string",
         "scenario": "string",
         "taskDescription": "string",
-        "type": "code",
-        "starterTemplate": "string",
+        "type": "logic" or "code",
+        "starterTemplate": "string (optional, only include if type is code)",
         "sampleGuidance": "string"
       },
       "comparison": {
@@ -549,7 +560,7 @@ Output strictly valid JSON only without markdown fences or preamble. Exactly 3 r
         userPrompt: prompt,
         temperature: 0.3,
         maxTokens: 3000,
-        timeoutMs: 3500,
+        timeoutMs: 25000,
       });
       data = extractCleanJson(rawText);
       if (!data?.profile || !Array.isArray(data?.recommendations) || data.recommendations.length === 0) {
@@ -586,6 +597,8 @@ app.post("/api/ai/generate-roadmap", async (req, res) => {
 
     const prompt = `Create a 7-stage personalized roadmap for a beginner learning: "${direction.directionName}".
 User background: ${JSON.stringify(profile || {}, null, 2)}
+
+IMPORTANT: Match all curriculum, resources, practical tasks, and projects directly to the real professional domain of "${direction.directionName}" (e.g. Design, Healthcare, Law, Business, Finance, Media, Education, or Technology). Do NOT prescribe coding or software developer tools unless "${direction.directionName}" is genuinely a software/tech role.
 
 Respond ONLY in valid JSON matching:
 {
@@ -641,7 +654,7 @@ Respond ONLY in valid JSON matching:
         userPrompt: prompt,
         temperature: 0.3,
         maxTokens: 3500,
-        timeoutMs: 3500,
+        timeoutMs: 25000,
       });
       data = extractCleanJson(rawText);
       if (!Array.isArray(data?.roadmap) || data.roadmap.length === 0) {
@@ -686,7 +699,7 @@ Respond in plain text.`;
         userPrompt: prompt,
         temperature: 0.6,
         maxTokens: 800,
-        timeoutMs: 6000,
+        timeoutMs: 20000,
       });
     } catch (err: any) {
       console.warn("[AI Feedback] Using tailored reflection fallback:", err?.message);
@@ -718,10 +731,6 @@ async function startServer() {
     console.log(`[ORBIT Database] Database ready (${dbStatus.engine}). Tables: ${dbStatus.tables.length}`);
   } catch (err: any) {
     console.error("[ORBIT Database] Startup error:", err.message);
-    if (isProduction) {
-      console.error("[ORBIT Database] Halting startup: Database initialization is mandatory in production.");
-      process.exit(1);
-    }
   }
 
   if (!isProduction) {

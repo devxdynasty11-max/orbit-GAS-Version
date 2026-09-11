@@ -236,43 +236,55 @@ export const ChallengeModal: React.FC<ChallengeModalProps> = ({
                   </div>
                 </div>
               ) : (
-                /* DESIGN / LOGIC CHALLENGE */
+                /* DOMAIN CASE / LOGIC CHALLENGE */
                 <div className="space-y-4">
-                  <p className="text-xs text-neutral-600 leading-relaxed">
-                    Look at this noisy mockup with competing banners. Which 2 elements should be removed so users can checkout comfortably?
-                  </p>
-                  <div className="space-y-2">
-                    {[
-                      'Giant flashing "BUY CRYPTO" banner',
-                      'Loud spinning prize wheel banner',
-                      'Primary "Confirm Order" checkout button',
-                      'Customer delivery address summary',
-                    ].map(item => (
-                      <button
-                        key={item}
-                        onClick={() => toggleFix(item)}
-                        className={`w-full p-3 rounded-xl border text-left text-xs font-medium transition flex items-center justify-between ${
-                          selectedFixes.includes(item)
-                            ? 'bg-purple-50 border-purple-600 text-[#111827]'
-                            : 'bg-white border-[#E2DDD5] text-neutral-600'
-                        }`}
-                      >
-                        <span>Remove: {item}</span>
-                        {selectedFixes.includes(item) && <CheckCircle2 className="w-4 h-4 text-purple-600" />}
-                      </button>
-                    ))}
+                  <div className="p-3.5 rounded-2xl bg-white border border-[#E2DDD5] space-y-2">
+                    <span className="text-[10px] font-mono font-semibold uppercase text-purple-700 tracking-wider">
+                      Hands-on Task
+                    </span>
+                    <p className="text-xs sm:text-sm text-[#111827] font-medium leading-relaxed">
+                      {challenge.taskDescription || "Analyze the scenario above and outline your recommended course of action."}
+                    </p>
+                    {challenge.sampleGuidance && (
+                      <p className="text-[11px] text-neutral-500 italic pt-1 border-t border-[#F0EBE4]">
+                        💡 Focus hint: {challenge.sampleGuidance}
+                      </p>
+                    )}
                   </div>
+
+                  {Array.isArray(challenge.options) && challenge.options.length > 0 ? (
+                    <div className="space-y-2">
+                      <label className="block text-xs text-neutral-600 font-medium">
+                        Select the primary factors you would address:
+                      </label>
+                      {challenge.options.map(item => (
+                        <button
+                          key={item}
+                          type="button"
+                          onClick={() => toggleFix(item)}
+                          className={`w-full p-3 rounded-xl border text-left text-xs font-medium transition flex items-center justify-between ${
+                            selectedFixes.includes(item)
+                              ? 'bg-purple-50 border-purple-600 text-[#111827]'
+                              : 'bg-white border-[#E2DDD5] text-neutral-600 hover:border-neutral-400'
+                          }`}
+                        >
+                          <span>{item}</span>
+                          {selectedFixes.includes(item) && <CheckCircle2 className="w-4 h-4 text-purple-600 shrink-0 ml-2" />}
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
 
                   <div>
                     <label className="block text-xs text-neutral-600 font-medium mb-1">
-                      Your thought: Why does removing visual noise help?
+                      Your analysis & proposed next action:
                     </label>
-                    <input
-                      type="text"
+                    <textarea
+                      rows={3}
                       value={customTextAnswer}
                       onChange={e => setCustomTextAnswer(e.target.value)}
-                      placeholder="e.g., Calm interfaces let people make decisions without anxiety."
-                      className="w-full p-2.5 rounded-xl border border-[#E2DDD5] bg-[#FAF8F5] text-xs focus:outline-none focus:border-purple-600"
+                      placeholder="Write your brief analysis or solution based on the scenario above..."
+                      className="w-full p-3 rounded-xl border border-[#E2DDD5] bg-[#FAF8F5] text-xs text-[#111827] focus:outline-none focus:border-purple-600 leading-relaxed"
                     />
                   </div>
                 </div>

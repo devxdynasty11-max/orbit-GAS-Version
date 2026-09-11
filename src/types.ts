@@ -48,9 +48,10 @@ export interface Challenge {
   title: string;
   scenario: string;
   taskDescription: string;
-  type: 'code' | 'design' | 'creative' | 'logic';
+  type: 'code' | 'design' | 'creative' | 'logic' | 'writing' | 'business' | 'analysis' | 'case_study';
   starterTemplate?: string;
   sampleGuidance: string;
+  options?: string[];
 }
 
 export interface RecommendationComparison {
@@ -88,6 +89,7 @@ export interface Recommendation {
   isRegulatedProfession?: boolean;
   formalRequirements?: FormalRequirements;
   careerGoal?: string;
+  category?: string;
 }
 
 export interface RoadmapTask {

@@ -57,7 +57,7 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({
   );
   const [existingSkills, setExistingSkills] = useState<string[]>(initialDraft?.existingSkills || []);
   const [curiousTopics, setCuriousTopics] = useState<string[]>(
-    initialDraft?.curiousTopics?.length ? initialDraft.curiousTopics : ['AI Tools & Intelligent Systems', 'Building Web & Mobile Apps']
+    initialDraft?.curiousTopics?.length ? initialDraft.curiousTopics : []
   );
   const [careerGoal, setCareerGoal] = useState<string>(
     initialDraft?.careerGoal || 'Find genuine clarity on what direction actually fits me'
@@ -182,7 +182,7 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({
       currentSkillLevel,
       experienceLevel: currentSkillLevel,
       existingSkills,
-      freeTimeActivities: curiousTopics.length > 0 ? curiousTopics : ['Exploring tech and digital tools'],
+      freeTimeActivities: curiousTopics.length > 0 ? curiousTopics : ['Exploring creative, analytical, and practical fields'],
       curiousTopics,
       careerGoal,
       learningStyle,
@@ -543,11 +543,11 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({
                 {[
                   {
                     title: 'Absolute Beginner',
-                    desc: 'Starting completely fresh from scratch. No prior coding, design, or tech experience.',
+                    desc: 'Starting completely fresh from scratch. No prior professional or field-specific experience.',
                   },
                   {
                     title: 'Familiar with Basics',
-                    desc: 'Know small basics (a bit of HTML/Python, basic Figma, or simple spreadsheets).',
+                    desc: 'Know core basics (introductory concepts, simple tools, or exploratory coursework).',
                   },
                   {
                     title: 'Intermediate Tinkerer',
@@ -585,14 +585,15 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({
                 </label>
                 <div className="flex flex-wrap gap-2">
                   {[
-                    'Basic Python / JS',
-                    'Visual Aesthetics / Canva',
-                    'Figma / UI Design',
-                    'Writing & Communication',
-                    'Video / Reels Editing',
-                    'Excel / Data Analysis',
-                    'Logical Math / Puzzles',
-                    'Clean slate (No existing skills)',
+                    'Writing & Editorial Storytelling',
+                    'Visual Aesthetics / Canva / Figma',
+                    'Business & Marketing Strategy',
+                    'Finance & Spreadsheet Analysis',
+                    'People Empathy & Active Listening',
+                    'Scientific & Laboratory Research',
+                    'Basic Coding / Web Development',
+                    'Public Speaking & Debate',
+                    'Clean slate (No existing skills yet)',
                   ].map(skill => {
                     const selected = existingSkills.includes(skill);
                     return (
@@ -646,14 +647,18 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                 {[
-                  { label: 'AI Tools & Intelligent Systems', icon: '🤖' },
-                  { label: 'Building Web & Mobile Apps', icon: '💻' },
-                  { label: 'UI/UX & Digital Product Design', icon: '🎨' },
-                  { label: 'Game Design & 3D Interactive Worlds', icon: '🎮' },
-                  { label: 'Cybersecurity & Ethical Hacking', icon: '🛡️' },
-                  { label: 'Data Science & Visualizations', icon: '📊' },
-                  { label: 'Automation & No-Code Systems', icon: '⚡' },
-                  { label: 'Indie Startups & Digital Products', icon: '🚀' },
+                  { label: 'Business, Startups & Entrepreneurship', icon: '💼' },
+                  { label: 'UI/UX, Product & Visual Design', icon: '🎨' },
+                  { label: 'Psychology, Human Behavior & People', icon: '🧠' },
+                  { label: 'Finance, Investing & Economics', icon: '📈' },
+                  { label: 'Media, Journalism & Storytelling', icon: '✍️' },
+                  { label: 'Healthcare, Medicine & Life Sciences', icon: '🩺' },
+                  { label: 'AI, Computing & Intelligent Systems', icon: '💻' },
+                  { label: 'Law, Public Policy & Governance', icon: '⚖️' },
+                  { label: 'Architecture, Interior & Space Design', icon: '🏛️' },
+                  { label: 'Physical Sciences & Sustainable Tech', icon: '🔬' },
+                  { label: 'Game Design & Interactive Worlds', icon: '🎮' },
+                  { label: 'Education & Community Leadership', icon: '📚' },
                 ].map(item => {
                   const selected = curiousTopics.includes(item.label);
                   return (
