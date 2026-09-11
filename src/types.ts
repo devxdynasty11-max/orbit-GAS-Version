@@ -40,6 +40,15 @@ export interface RecommendationComparison {
   whoMightEnjoy: string;
 }
 
+export interface FormalRequirements {
+  education: string[];
+  eligibility: string[];
+  entranceExams: string[];
+  qualificationsAndLicensing: string[];
+  practicalExperience: string[];
+  careerProgression: string[];
+}
+
 export interface Recommendation {
   id: string;
   directionName: string;
@@ -52,20 +61,29 @@ export interface Recommendation {
   futureOpportunities: string[];
   challenge: Challenge;
   comparison: RecommendationComparison;
+  isRegulatedProfession?: boolean;
+  formalRequirements?: FormalRequirements;
+  careerGoal?: string;
 }
 
 export interface RoadmapTask {
   id: string;
   text: string;
   done: boolean;
+  skipped?: boolean;
+  category?: string;
 }
 
 export interface RoadmapStage {
   id: string;
   stageNumber: number;
-  stageKey: 'START HERE' | 'BASICS' | 'FIRST PROJECT' | 'PRACTICE' | 'REAL PROJECTS' | 'PORTFOLIO' | 'NEXT LEVEL';
+  stageKey: string;
   title: string;
   subtitle: string;
+  estimatedTime?: string;
+  whyLearningThis?: string;
+  howItHelpsCareer?: string;
+  whatComesAfter?: string;
   whatToLearn: string[];
   whyItMatters: string;
   whatToPractice: string[];

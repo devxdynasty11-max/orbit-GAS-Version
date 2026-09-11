@@ -226,6 +226,41 @@ export default function App() {
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
+  // 3b. Dynamic custom pathway generation for any career (Medicine, Flight, AI, Law, etc.)
+  const handleGenerateCareerPathway = async (careerGoal: string): Promise<boolean> => {
+    try {
+      const res = await fetch('/api/ai/generate-career-pathway', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          careerGoal,
+          profile: userState.profile,
+          userId: 'default-explorer',
+        }),
+      });
+      if (!res.ok) throw new Error('Pathway generation failed');
+      const data = await res.json();
+      if (data.recommendation && Array.isArray(data.roadmap) && data.roadmap.length > 0) {
+        setUserState(prev => ({
+          ...prev,
+          selectedDirectionId: data.recommendation.id,
+          selectedDirection: data.recommendation,
+          roadmap: data.roadmap,
+          resources: data.resources || prev.resources,
+          projects: data.projects || prev.projects,
+          completedTaskIds: [],
+        }));
+        addActivity(`Generated tailored pathway for "${careerGoal}"`);
+        setCurrentView('dashboard');
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+        return true;
+      }
+    } catch (err) {
+      console.error('Failed to generate career pathway:', err);
+    }
+    return false;
+  };
+
   // 4. Task toggle handler
   const handleToggleTask = (taskId: string) => {
     const isCurrentlyDone = userState.completedTaskIds.includes(taskId);
@@ -472,6 +507,7 @@ export default function App() {
             onOpenMentor={() => setIsMentorOpen(true)}
             onChangeDirection={() => setCurrentView('recommendations')}
             onStartFresh={() => setIsStartFreshOpen(true)}
+            onGenerateCustomPathway={handleGenerateCareerPathway}
           />
         )}
       </main>

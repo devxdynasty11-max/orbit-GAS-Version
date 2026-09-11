@@ -39,7 +39,7 @@ export const RecommendationsView: React.FC<RecommendationsViewProps> = ({
   };
 
   return (
-    <div className="w-full max-w-4xl mx-auto py-8 sm:py-16 px-4 sm:px-6 space-y-10">
+    <div className="w-full max-w-4xl mx-auto py-8 sm:py-16 px-4 sm:px-6 space-y-10 pb-28 sm:pb-16">
       {/* Editorial Header */}
       <div className="text-center max-w-xl mx-auto space-y-3">
         <div className="inline-flex items-center gap-1.5 text-xs tracking-wider uppercase font-semibold text-purple-700">
@@ -70,6 +70,7 @@ export const RecommendationsView: React.FC<RecommendationsViewProps> = ({
         {validRecs.map((rec, index) => {
           const isExpanded = expandedCardId === rec.id;
           const hasDoneChallenge = completedChallengeIds.includes(rec.id);
+          const isRegulated = Boolean(rec.isRegulatedProfession);
 
           return (
             <div
@@ -79,9 +80,16 @@ export const RecommendationsView: React.FC<RecommendationsViewProps> = ({
               <div className="space-y-4">
                 {/* Number & Tag */}
                 <div className="flex items-center justify-between">
-                  <span className="text-xs font-mono font-semibold text-purple-700">
-                    0{index + 1}
-                  </span>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-mono font-semibold text-purple-700">
+                      0{index + 1}
+                    </span>
+                    {isRegulated && (
+                      <span className="text-[10px] font-mono uppercase text-amber-800 bg-amber-50 px-2 py-0.5 rounded-full font-semibold border border-amber-200/60">
+                        Regulated
+                      </span>
+                    )}
+                  </div>
                   {hasDoneChallenge && (
                     <span className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full">
                       <CheckCircle2 className="w-3 h-3 text-emerald-600" />

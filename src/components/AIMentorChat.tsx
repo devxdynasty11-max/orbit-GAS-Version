@@ -15,15 +15,30 @@ interface AIMentorChatProps {
 }
 
 export const AIMentorChat: React.FC<AIMentorChatProps> = ({ isOpen, onClose, userState }) => {
+  const currentStage =
+    userState.roadmap.find(s => s.tasks.some(t => !userState.completedTaskIds.includes(t.id))) ||
+    userState.roadmap[0];
+
+  const chosenPath = userState.selectedDirection?.directionName;
+  const isRegulated = userState.selectedDirection?.isRegulatedProfession;
+
+  const initialGreeting = chosenPath
+    ? `Hey there! I'm your ORBIT Mentor. I see you're currently working through **${currentStage?.title || 'your foundational steps'}** in **${chosenPath}**${
+        isRegulated ? ' (a regulated professional path)' : ''
+      }.
+
+How are you feeling about your progress, or what's on your mind right now?`
+    : `Hey 👋 I'm your ORBIT Career & Learning Mentor.
+
+Whether you're feeling uncertain about which direction fits your personality, stuck on a concept, or wondering what to build next, I'm right here with you.
+
+What would you like to explore today?`;
+
   const [messages, setMessages] = useState<ChatMessage[]>(() => [
     {
       id: 'welcome',
       role: 'assistant',
-      content: `Hey 👋 I'm your ORBIT guide.
-
-Whether you're feeling stuck, wondering what to learn next, or need something explained in plain English without jargon, I'm right here.
-
-What's on your mind?`,
+      content: initialGreeting,
       timestamp: 'Just now',
     },
   ]);
@@ -44,12 +59,19 @@ What's on your mind?`,
 
   if (!isOpen) return null;
 
-  const quickPrompts = [
-    'What should I focus on today?',
-    "I'm confused about what to learn next.",
-    'Explain my current roadmap simply.',
-    'Give me a tiny beginner project idea.',
-  ];
+  const quickPrompts = chosenPath
+    ? [
+        `What's my single next step in ${currentStage?.title ? `Stage ${currentStage.stageNumber}` : 'this stage'}?`,
+        'Why is this stage important for my career?',
+        "I'm feeling stuck or overwhelmed.",
+        'Give me a tiny 15-minute practice win.',
+      ]
+    : [
+        'How do I discover my natural strengths?',
+        'What careers match curious problem solvers?',
+        'I have no tech background—where do I start?',
+        'Help me choose between two paths.',
+      ];
 
   const handleSend = async (textToSend: string) => {
     const text = textToSend.trim();
@@ -68,14 +90,23 @@ What's on your mind?`,
     setLoading(true);
 
     try {
+      const pendingTasks = currentStage
+        ? currentStage.tasks.filter(t => !userState.completedTaskIds.includes(t.id)).map(t => t.text)
+        : [];
+
       const userContext = {
-        chosenDirection: userState.selectedDirection?.directionName || 'Exploring options',
-        profileSummary: userState.profile?.summary || 'New Explorer',
+        chosenDirection: chosenPath || 'Exploring career options',
+        careerGoal: userState.selectedDirection?.careerGoal || chosenPath,
+        isRegulatedProfession: Boolean(isRegulated),
+        profileSummary: userState.profile?.summary || userState.profile?.headline || 'Explorer',
+        strengths: userState.profile?.naturalStrengths || [],
+        hesitations: userState.profile?.thingsToAvoid || [],
+        startingLevel: userState.profile?.startingLevel || 'Beginner',
         completedTasksCount: userState.completedTaskIds.length,
-        currentStage:
-          userState.roadmap.find(s =>
-            s.tasks.some(t => !userState.completedTaskIds.includes(t.id))
-          )?.title || 'Foundation',
+        currentStage: currentStage?.title || 'Foundation',
+        currentStageNumber: currentStage?.stageNumber,
+        whyLearningThis: currentStage?.whyLearningThis || currentStage?.whyItMatters,
+        pendingTasks: pendingTasks.slice(0, 3),
       };
 
       const res = await fetch('/api/ai/chat', {
@@ -104,7 +135,8 @@ What's on your mind?`,
         {
           id: `ai-err-${Date.now()}`,
           role: 'assistant',
-          content: "I ran into a brief glitch connecting to the model, but here's a simple thought: start with just 15 minutes of hands-on practice today. What part feels most unclear?",
+          content:
+            "I'm right here with you. Take a quick breath—you don't have to figure out the whole career today. Pick just one 15-minute concept to try. What part feels most unclear?",
           timestamp: 'Just now',
         },
       ]);

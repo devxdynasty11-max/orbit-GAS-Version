@@ -258,8 +258,18 @@ export async function initDatabase(): Promise<DbStatus> {
     dbInitialized = true;
     return getDbStatus();
   } catch (err: any) {
-    console.error('Failed to initialize local embedded PostgreSQL engine:', err);
-    throw err;
+    console.warn('Persistent PGlite failed, falling back to in-memory PGlite:', err?.message || err);
+    try {
+      pgliteDb = new PGlite();
+      activeEngine = 'embedded_postgres';
+      await pgliteDb.exec(MIGRATION_SQL);
+      console.log('All migrations applied successfully to in-memory PostgreSQL engine!');
+      dbInitialized = true;
+      return getDbStatus();
+    } catch (inMemErr: any) {
+      console.error('Failed to initialize embedded PostgreSQL engine:', inMemErr);
+      throw inMemErr;
+    }
   }
 }
 

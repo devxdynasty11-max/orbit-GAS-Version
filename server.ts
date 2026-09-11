@@ -22,15 +22,17 @@ import {
 
 import {
   callAIModel,
+  callAIChat,
   extractCleanJson,
   synthesizeRecommendationsFallback,
-  synthesizeRoadmapFallback
+  synthesizeRoadmapFallback,
+  synthesizeCareerPathwayFallback
 } from "./server/ai";
 
 dotenv.config();
 
 const app = express();
-const PORT = Number(process.env.PORT) || 3000;
+const PORT = 3000;
 
 app.use(express.json({ limit: "2mb" }));
 
@@ -185,7 +187,7 @@ app.get("/api/user/journey-history", async (req, res) => {
   }
 });
 
-// 1. AI Chat Route for Mentor & Interactive Guide
+// 1. AI Chat Route for Contextual Mentor & Career Guide
 app.post("/api/ai/chat", async (req, res) => {
   try {
     const { messages, userContext } = req.body;
@@ -196,50 +198,75 @@ app.post("/api/ai/chat", async (req, res) => {
     const userId = req.body.userId || "default-explorer";
     const lastUserMsg = messages[messages.length - 1]?.content || "";
 
-    // Prepare system prompt with friendly ORBIT personality and user context
-    let systemInstruction = `You are ORBIT's intelligent personal career and skill guide for students and young people.
-Your brand is ORBIT, built by ADITYAX.
-Core philosophy: "Everyone is running. But where are you going?"
-Help users go from confused to understood, then explore, try, choose, learn, build, and grow.
+    // Contextual Mentor Persona
+    const chosenDirection = userContext?.chosenDirection || "Exploring career paths";
+    const currentStage = userContext?.currentStage || "Foundation";
+    const completedCount = userContext?.completedTasksCount ?? 0;
+    const profileSummary = userContext?.profileSummary || "";
+    const strengths = Array.isArray(userContext?.strengths) ? userContext.strengths.join(", ") : "";
+    const hesitations = Array.isArray(userContext?.hesitations) ? userContext.hesitations.join(", ") : "";
+    const isRegulated = Boolean(userContext?.isRegulatedProfession);
 
-Personality:
-- Friendly, patient, encouraging, honest, concise, curious, and non-judgmental.
-- Speak in simple, natural, everyday language. Never use corporate jargon or buzzwords.
-- Keep answers practical, grounded, and bite-sized (1-2 short paragraphs).
-- If the user is overwhelmed, break the next step into something tiny and achievable in 15 minutes.
-- CHANGING DIRECTION IS ALWAYS ALLOWED: If the user has started fresh or changed their mind, never anchor on old abandoned choices. Look at their current direction with fresh eyes!`;
+    const systemInstruction = `You are ORBIT's dedicated AI Career & Learning Mentor.
+You are NOT a generic search bot or chatbot. You are an experienced, empathetic, highly contextual career guide who understands that deciding a future can feel overwhelming.
 
-    if (userContext) {
-      systemInstruction += `\n\nUser Context:\n${JSON.stringify(userContext, null, 2)}`;
-    }
+Philosophy & Identity:
+- Brand: ORBIT (built by ADITYAX / Aetherix).
+- Core philosophy: "Everyone is running. But where are you going?"
+- Your mission is to help the explorer go from confused to understood, then explore, try, choose, learn, build, and grow.
 
-    const conversationText = messages
-      .slice(-6)
-      .map((m: any) => `${m.role === "user" ? "User" : "Mentor"}: ${m.content}`)
-      .join("\n\n");
+User Current Context:
+- Target Direction: ${chosenDirection} (${isRegulated ? "Regulated Profession with formal licensing/education requirements" : "Modern practical/tech/creative pathway"})
+- Current Active Stage: ${currentStage}
+- Completed Roadmap Milestones: ${completedCount} completed
+- Profile Snapshot: ${profileSummary || "Self-directed learner"}
+${strengths ? `- Identified Strengths: ${strengths}` : ""}
+${hesitations ? `- Reported Hesitations/Avoidances: ${hesitations}` : ""}
+
+Mentor Interaction Rules:
+1. Speak with warmth, clarity, and authentic mentorship. Avoid corporate buzzwords, filler phrases ("Certainly!", "As an AI..."), and robotic bullet lists.
+2. Be concise by default (1 to 3 short, easy-to-read paragraphs), but deep and insightful when the user asks a complex question.
+3. Help the user reflect on their own tendencies and interests rather than prescribing a one-size-fits-all formula.
+4. End with at most ONE gentle, thoughtful follow-up question or a single 15-minute micro-step to keep momentum going without overwhelming them.
+5. If the user expresses confusion, imposter syndrome, or uncertainty, validate their feeling first and ground them in their next immediate action.
+6. If the path is a regulated profession (Medicine, Law, Aviation, Civil Engineering, CPA), clearly distinguish formal academic/licensing checkpoints from self-study tips.`;
+
+    // Filter messages for chat
+    const chatSequence = messages
+      .slice(-10)
+      .map((m: any) => ({
+        role: (m.role === "assistant" ? "assistant" : "user") as "user" | "assistant",
+        content: String(m.content || "").trim(),
+      }))
+      .filter((m) => m.content.length > 0);
 
     let aiMessage = "";
     try {
-      aiMessage = await callAIModel({
+      aiMessage = await callAIChat({
         systemPrompt: systemInstruction,
-        userPrompt: conversationText,
-        temperature: 0.6,
+        messages: chatSequence,
+        temperature: 0.65,
         maxTokens: 1024,
-        timeoutMs: 6000,
+        timeoutMs: 25000,
       });
     } catch (aiErr: any) {
       console.warn("[AI Chat] Fallback triggered:", aiErr?.message);
-      const chosenDir = userContext?.chosenDirection || "your path";
-      aiMessage = `I'm right here with you! When exploring ${chosenDir}, remember the most important rule: start tiny. Pick just one 15-minute concept or interactive test today. You don't need to know the next 5 years—just your next single step. What part feels most interesting to try?`;
+      if (lastUserMsg.toLowerCase().includes("stuck") || lastUserMsg.toLowerCase().includes("confus")) {
+        aiMessage = `Feeling unsure is completely normal when you're navigating ${chosenDirection}. When everything feels big, zoom in: what is one 15-minute concept or tiny task you could look at today just to see how it feels?`;
+      } else if (lastUserMsg.toLowerCase().includes("project") || lastUserMsg.toLowerCase().includes("build")) {
+        aiMessage = `The best first projects are tiny, personal, and tangible. For ${chosenDirection}, pick something with just 2 features that solves a small annoyance you face daily. Would you like a beginner idea to spark your thinking?`;
+      } else {
+        aiMessage = `Looking at your progress in ${chosenDirection} (currently in ${currentStage}), you've already made meaningful moves with ${completedCount} milestones reached. What's the one concept that felt most interesting so far?`;
+      }
     }
 
-    // Persist conversation turn in PostgreSQL ai_mentor_context table
+    // Persist conversation turn in PostgreSQL
     if (lastUserMsg) {
-      saveMentorMessage(userId, "user", lastUserMsg, userContext?.currentStage).catch(e =>
+      saveMentorMessage(userId, "user", lastUserMsg, currentStage).catch((e) =>
         console.warn("Could not persist user chat message to DB:", e.message)
       );
     }
-    saveMentorMessage(userId, "assistant", aiMessage, userContext?.currentStage).catch(e =>
+    saveMentorMessage(userId, "assistant", aiMessage, currentStage).catch((e) =>
       console.warn("Could not persist AI chat message to DB:", e.message)
     );
 
@@ -247,8 +274,134 @@ Personality:
   } catch (error: any) {
     console.error("Error in /api/ai/chat:", error?.message || error);
     return res.json({
-      content: "I'm here to help you figure this out step-by-step. Pick one small project or skill you feel curious about today, and let's test it together!",
+      content:
+        "I'm right here with you. Take a breath—you don't need to master the whole mountain today. Let's look at your next 15 minutes. What would you like to explore?",
     });
+  }
+});
+
+// 1b. Dynamic Career Pathway Generator (Supports ANY career goal & regulated professions)
+app.post("/api/ai/generate-career-pathway", async (req, res) => {
+  try {
+    const { careerGoal, profile, userId = "default-explorer" } = req.body;
+    if (!careerGoal || typeof careerGoal !== "string" || careerGoal.trim().length === 0) {
+      return res.status(400).json({ error: "Career goal is required." });
+    }
+
+    const cleanGoal = careerGoal.trim();
+
+    const prompt = `You are ORBIT's career pathways engine.
+Create a rich, personalized career roadmap for: "${cleanGoal}".
+User Profile: ${JSON.stringify(profile || {}, null, 2)}
+
+Determine if this is a regulated profession (e.g. Medicine, Law, Aviation, Structural Engineering, CPA, Nursing, etc.).
+If regulated:
+- set "isRegulatedProfession": true
+- provide "formalRequirements": {
+    "education": ["..."],
+    "eligibility": ["..."],
+    "entranceExams": ["..."],
+    "qualificationsAndLicensing": ["..."],
+    "practicalExperience": ["..."],
+    "careerProgression": ["..."]
+  }
+- generate 5-7 realistic stages reflecting the academic, exam, practicum, and licensing checkpoints.
+
+If not regulated (tech, design, entrepreneurship, creative, business):
+- set "isRegulatedProfession": false
+- generate 6-7 progressive stages (Orientation/Sandbox -> Core Skills -> First Tangible Project -> Problem Solving -> Real-world Flagship Projects -> Portfolio -> Career Launch).
+
+Every stage MUST have:
+- "id": "stg-1", etc.
+- "stageNumber": number
+- "stageKey": short uppercase title (e.g. "ORIENTATION", "FOUNDATION", "FIRST PROJECT", etc.)
+- "title": string
+- "subtitle": string
+- "estimatedTime": string (e.g. "2-4 weeks")
+- "whyLearningThis": "Why am I learning this?" (clear plain-English answer)
+- "howItHelpsCareer": "How does this help my career?" (direct career benefit)
+- "whatComesAfter": "What comes after this?"
+- "whatToLearn": ["string"]
+- "whyItMatters": "string"
+- "whatToPractice": ["string"]
+- "whatToBuild": "string"
+- "whatSuccessLooksLike": "string"
+- "whatToDoNext": "string"
+- "tasks": [{ "id": "t-1", "text": "string", "done": false, "category": "string" }]
+
+Output strictly valid JSON only:
+{
+  "recommendation": {
+    "id": "dir-custom",
+    "directionName": "string",
+    "careerGoal": "${cleanGoal}",
+    "tagline": "string",
+    "simpleExplanation": "string",
+    "whyItFitsYou": "string",
+    "dayInTheLife": ["string"],
+    "beginnerSkills": ["string"],
+    "whatYouCanTryToday": "string",
+    "futureOpportunities": ["string"],
+    "isRegulatedProfession": boolean,
+    "formalRequirements": null or object,
+    "challenge": {
+      "title": "string",
+      "scenario": "string",
+      "taskDescription": "string",
+      "type": "code" or "logic",
+      "starterTemplate": "string",
+      "sampleGuidance": "string"
+    },
+    "comparison": {
+      "whatIsIt": "string",
+      "whatWouldIDo": "string",
+      "creativeFactor": "string",
+      "problemSolving": "string",
+      "workingWithPeople": "string",
+      "beginnerDifficulty": "string",
+      "whatCanITryToday": "string",
+      "whoMightEnjoy": "string"
+    }
+  },
+  "roadmap": [ ... ],
+  "resources": [
+    { "id": "res-1", "name": "string", "type": "free", "category": "string", "description": "string", "urlOrNote": "string" }
+  ],
+  "projects": [
+    { "id": "proj-1", "title": "string", "level": "Beginner", "objective": "string", "skillsPracticed": ["string"], "expectedOutput": "string", "difficulty": "string", "suggestedNextStep": "string", "completed": false }
+  ]
+}`;
+
+    let data: any = null;
+    try {
+      const rawText = await callAIModel({
+        systemPrompt: "You are ORBIT curriculum and career path architect. You produce strictly valid JSON matching the schema.",
+        userPrompt: prompt,
+        temperature: 0.3,
+        maxTokens: 3500,
+        timeoutMs: 25000,
+      });
+      data = extractCleanJson(rawText);
+      if (!data?.recommendation || !Array.isArray(data?.roadmap) || data.roadmap.length === 0) {
+        throw new Error("Invalid AI generated pathway payload");
+      }
+    } catch (aiErr: any) {
+      console.warn("[AI Career Pathway] Falling back to robust deterministic synthesis:", aiErr?.message);
+      data = synthesizeCareerPathwayFallback(cleanGoal, profile);
+    }
+
+    // Persist path if requested
+    if (data?.recommendation && data?.roadmap) {
+      saveSelectedPathAndRoadmap(userId, data.recommendation, data.roadmap).catch((e) =>
+        console.warn("Failed to auto-persist pathway to DB:", e.message)
+      );
+    }
+
+    return res.json(data);
+  } catch (error: any) {
+    console.error("Critical error in /api/ai/generate-career-pathway:", error?.message || error);
+    const fallback = synthesizeCareerPathwayFallback(req.body?.careerGoal || "Software Engineer", req.body?.profile);
+    return res.json(fallback);
   }
 });
 
