@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <defs>
+    <linearGradient id="orbitPlanet" x1="0%" y1="100%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#4338CA" />
+      <stop offset="48%" stop-color="#7C3AED" />
+      <stop offset="100%" stop-color="#A855F7" />
+    </linearGradient>
+    <linearGradient id="orbitRing" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FFFFFF" />
+      <stop offset="100%" stop-color="#DDD6FE" />
+    </linearGradient>
+    <filter id="coreGlow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="1" result="blur" />
+      <feMerge>
+        <feMergeNode in="blur" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Back arc of Orbit Ring (Behind Planet) -->
+  <path
+    d="M 7.98 43.20 A 26.5 9.5 -25 0 1 56.02 20.80"
+    stroke="#C4B5FD"
+    stroke-width="3.75"
+    stroke-linecap="round"
+    opacity="0.85"
+  />
+
+  <!-- Central Planet Sphere -->
+  <circle cx="32" cy="32" r="18.5" fill="url(#orbitPlanet)" />
+
+  <!-- Central Celestial Star Core -->
+  <circle cx="32" cy="32" r="5.5" fill="#FFFFFF" filter="url(#coreGlow)" />
+
+  <!-- Front arc of Orbit Ring (In Front of Planet) -->
+  <path
+    d="M 56.02 20.80 A 26.5 9.5 -25 0 1 7.98 43.20"
+    stroke="url(#orbitRing)"
+    stroke-width="4.25"
+    stroke-linecap="round"
+  />
+
+  <!-- Orbiting Satellite Beacon -->
+  <circle cx="51.5" cy="24.2" r="3.6" fill="#FFFFFF" filter="url(#coreGlow)" />
+</svg>
