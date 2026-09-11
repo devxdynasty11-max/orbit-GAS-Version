@@ -1,5 +1,6 @@
 import express from "express";
 import path from "path";
+import fs from "fs";
 import dotenv from "dotenv";
 import { OpenAI } from "openai";
 import { createServer as createViteServer } from "vite";
@@ -29,7 +30,7 @@ import {
 dotenv.config();
 
 const app = express();
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
 
 app.use(express.json({ limit: "2mb" }));
 
@@ -476,7 +477,13 @@ async function startServer() {
     console.error("[ORBIT Database] Startup error:", err.message);
   }
 
-  if (process.env.NODE_ENV !== "production") {
+  // Determine production mode: explicit NODE_ENV=production, or running as bundled .cjs, or dist/index.html exists
+  const isProduction =
+    process.env.NODE_ENV === "production" ||
+    (typeof __filename !== "undefined" && __filename.endsWith(".cjs")) ||
+    (!process.env.NODE_ENV && fs.existsSync(path.join(process.cwd(), "dist", "index.html")));
+
+  if (!isProduction) {
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
@@ -484,6 +491,13 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     const distPath = path.join(process.cwd(), "dist");
+    // Protect server bundle and sourcemap files from public downloads
+    app.use((req, res, next) => {
+      if (req.path === "/server.cjs" || req.path.endsWith(".cjs") || req.path.endsWith(".map")) {
+        return res.status(404).end();
+      }
+      next();
+    });
     app.use(express.static(distPath));
     app.get("*", (_req, res) => {
       res.sendFile(path.join(distPath, "index.html"));
