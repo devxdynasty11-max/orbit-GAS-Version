@@ -32,7 +32,7 @@ import {
 dotenv.config();
 
 const app = express();
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
 
 app.use(express.json({ limit: "2mb" }));
 
@@ -622,19 +622,26 @@ Respond in plain text.`;
 });
 
 async function startServer() {
+  // Determine production mode: explicit NODE_ENV=production, Render environment, or running as bundled .cjs
+  const isProduction =
+    process.env.NODE_ENV === "production" ||
+    process.env.RENDER === "true" ||
+    Boolean(process.env.RENDER_SERVICE_ID) ||
+    Boolean(process.env.RENDER_INSTANCE_ID) ||
+    (typeof __filename !== "undefined" && __filename.endsWith(".cjs")) ||
+    (!process.env.NODE_ENV && fs.existsSync(path.join(process.cwd(), "dist", "index.html")));
+
   // Initialize PostgreSQL and run all migrations
   try {
     const dbStatus = await initDatabase();
-    console.log(`[ORBIT Database] Status: ${dbStatus.engine}, Tables: ${dbStatus.tables.length}`);
+    console.log(`[ORBIT Database] Database ready (${dbStatus.engine}). Tables: ${dbStatus.tables.length}`);
   } catch (err: any) {
     console.error("[ORBIT Database] Startup error:", err.message);
+    if (isProduction) {
+      console.error("[ORBIT Database] Halting startup: Database initialization is mandatory in production.");
+      process.exit(1);
+    }
   }
-
-  // Determine production mode: explicit NODE_ENV=production, or running as bundled .cjs, or dist/index.html exists
-  const isProduction =
-    process.env.NODE_ENV === "production" ||
-    (typeof __filename !== "undefined" && __filename.endsWith(".cjs")) ||
-    (!process.env.NODE_ENV && fs.existsSync(path.join(process.cwd(), "dist", "index.html")));
 
   if (!isProduction) {
     const vite = await createViteServer({

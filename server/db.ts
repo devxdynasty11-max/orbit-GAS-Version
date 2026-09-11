@@ -1,7 +1,6 @@
 import fs from 'fs';
 import path from 'path';
 import { Pool } from 'pg';
-import { PGlite } from '@electric-sql/pglite';
 
 export interface DbStatus {
   connected: boolean;
@@ -14,8 +13,8 @@ export interface DbStatus {
 }
 
 let pgPool: Pool | null = null;
-let pgliteDb: PGlite | null = null;
-let activeEngine: 'remote_postgres' | 'embedded_postgres' = 'embedded_postgres';
+let pgliteDb: any = null;
+let activeEngine: 'remote_postgres' | 'embedded_postgres' = 'remote_postgres';
 let dbInitialized = false;
 
 // Migration SQL statements for PostgreSQL
@@ -186,6 +185,48 @@ export async function dbQuery<T = any>(text: string, params: any[] = []): Promis
 }
 
 /**
+ * Detect production environment (e.g. Render, Cloud deployment, or bundled .cjs)
+ */
+export function isProductionEnvironment(): boolean {
+  return (
+    process.env.NODE_ENV === 'production' ||
+    process.env.RENDER === 'true' ||
+    Boolean(process.env.RENDER_SERVICE_ID) ||
+    Boolean(process.env.RENDER_INSTANCE_ID) ||
+    (typeof __filename !== 'undefined' && __filename.endsWith('.cjs'))
+  );
+}
+
+/**
+ * Safely sanitize and normalize DATABASE_URL without trailing quotes or spaces
+ */
+export function cleanDatabaseUrl(raw?: string): string {
+  if (!raw) return '';
+  let url = raw.trim();
+  if (
+    (url.startsWith('"') && url.endsWith('"')) ||
+    (url.startsWith("'") && url.endsWith("'"))
+  ) {
+    url = url.slice(1, -1).trim();
+  }
+  return url;
+}
+
+/**
+ * Check if connection string contains unconfigured placeholder tokens
+ */
+export function isPlaceholderDatabaseUrl(url: string): boolean {
+  if (!url) return true;
+  return (
+    url.includes('YOUR-PASSWORD') ||
+    url.includes('[YOUR-PASSWORD]') ||
+    url.includes('%5BYOUR-PASSWORD%5D') ||
+    url.includes('<YOUR-PASSWORD>') ||
+    url.toLowerCase().includes('your-password')
+  );
+}
+
+/**
  * Initialize Database and run all migrations
  */
 export async function initDatabase(): Promise<DbStatus> {
@@ -193,83 +234,115 @@ export async function initDatabase(): Promise<DbStatus> {
     return getDbStatus();
   }
 
-  const dbUrl = process.env.DATABASE_URL;
-  let hasValidRemoteUrl = false;
-  let isPlaceholderPassword = false;
+  const rawUrl = process.env.DATABASE_URL;
+  const dbUrl = cleanDatabaseUrl(rawUrl);
+  const isProd = isProductionEnvironment();
 
-  if (dbUrl) {
-    try {
-      const parsed = new URL(dbUrl);
-      const decodedPassword = decodeURIComponent(parsed.password || '');
-      if (
-        decodedPassword.includes('YOUR-PASSWORD') ||
-        decodedPassword === '' ||
-        decodedPassword === '[YOUR-PASSWORD]'
-      ) {
-        isPlaceholderPassword = true;
-      } else {
-        hasValidRemoteUrl = true;
-      }
-    } catch {
-      // invalid URL format
+  // ==========================================
+  // PRODUCTION ENVIRONMENT (Render / Production)
+  // ==========================================
+  if (isProd) {
+    // 1. Validate DATABASE_URL existence and completeness
+    if (!dbUrl || isPlaceholderDatabaseUrl(dbUrl)) {
+      console.error('================================================================');
+      console.error('[ORBIT Database] FATAL: DATABASE_URL is not configured for production!');
+      console.error('[ORBIT Database] Render deployment requires a remote PostgreSQL database (Supabase).');
+      console.error('[ORBIT Database] Local embedded PGlite is strictly disabled in production to prevent out-of-memory errors.');
+      console.error('[ORBIT Database] Please add your Supabase DATABASE_URL to Render Environment Variables.');
+      console.error('================================================================');
+      throw new Error(
+        '[ORBIT Database] FATAL: Missing or placeholder DATABASE_URL in production. Local embedded PGlite engine cannot be run on Render Free (512MB RAM limit).'
+      );
     }
-  }
 
-  // Attempt remote PostgreSQL connection if valid credentials are found
-  if (hasValidRemoteUrl && dbUrl) {
+    // 2. Connect to remote PostgreSQL
+    console.log('[ORBIT Database] Production environment detected.');
+    console.log('[ORBIT Database] Using remote PostgreSQL database (DATABASE_URL configured).');
+
     try {
-      console.log('Testing remote PostgreSQL connection via DATABASE_URL...');
       const pool = new Pool({
         connectionString: dbUrl,
         ssl: { rejectUnauthorized: false },
-        connectionTimeoutMillis: 5000,
+        max: 5, // Low pool size to keep memory footprint minimal on Render 512MB limit
+        idleTimeoutMillis: 30000,
+        connectionTimeoutMillis: 10000,
       });
 
       // Quick ping test
       await pool.query('SELECT 1 as test');
       pgPool = pool;
       activeEngine = 'remote_postgres';
-      console.log('Connected to remote PostgreSQL successfully!');
+      console.log('[ORBIT Database] Connected to remote PostgreSQL successfully!');
 
       // Run migrations on remote PostgreSQL
       await pgPool.query(MIGRATION_SQL);
-      console.log('All migrations applied successfully to remote PostgreSQL!');
+      console.log('[ORBIT Database] All schemas and migrations verified on remote PostgreSQL!');
 
       dbInitialized = true;
       return getDbStatus();
     } catch (err: any) {
-      console.warn('Remote PostgreSQL connection failed, switching to embedded PostgreSQL engine:', err.message);
+      console.error('================================================================');
+      console.error('[ORBIT Database] FATAL: Failed to connect to remote PostgreSQL database!');
+      console.error('[ORBIT Database] Error:', err.message);
+      console.error('[ORBIT Database] Verify that your Supabase database is active, reachable, and the password in DATABASE_URL is correct.');
+      console.error('[ORBIT Database] Embedded PGlite fallback is strictly forbidden in production.');
+      console.error('================================================================');
+      throw new Error(`[ORBIT Database] Remote PostgreSQL connection failed: ${err.message}`);
     }
   }
 
-  // Fallback to embedded PostgreSQL (PGlite)
+  // ==========================================
+  // DEVELOPMENT ENVIRONMENT (Local Dev)
+  // ==========================================
+  // If valid remote DATABASE_URL is provided in dev, use it
+  if (dbUrl && !isPlaceholderDatabaseUrl(dbUrl)) {
+    try {
+      console.log('[ORBIT Database] (Dev mode) Testing remote PostgreSQL connection via DATABASE_URL...');
+      const pool = new Pool({
+        connectionString: dbUrl,
+        ssl: { rejectUnauthorized: false },
+        connectionTimeoutMillis: 8000,
+      });
+
+      await pool.query('SELECT 1 as test');
+      pgPool = pool;
+      activeEngine = 'remote_postgres';
+      console.log('[ORBIT Database] (Dev mode) Connected to remote PostgreSQL successfully!');
+
+      await pgPool.query(MIGRATION_SQL);
+      console.log('[ORBIT Database] (Dev mode) Migrations applied successfully to remote PostgreSQL!');
+
+      dbInitialized = true;
+      return getDbStatus();
+    } catch (err: any) {
+      console.warn('[ORBIT Database] (Dev mode) Remote PostgreSQL connection failed, switching to local dev fallback:', err.message);
+    }
+  }
+
+  // Dev-only fallback: Dynamically load PGlite so it is NEVER required or loaded in production
   try {
+    const { PGlite } = await import('@electric-sql/pglite');
     const dataDir = path.join(process.cwd(), 'data', 'orbit_pg');
     fs.mkdirSync(path.dirname(dataDir), { recursive: true });
 
     pgliteDb = new PGlite(dataDir);
     activeEngine = 'embedded_postgres';
-    console.log('Initialized local embedded PostgreSQL engine at:', dataDir);
+    console.log('[ORBIT Database] (Dev mode) Initialized local embedded PostgreSQL engine at:', dataDir);
 
-    // Run migrations on embedded PostgreSQL
     await pgliteDb.exec(MIGRATION_SQL);
-    console.log('All migrations applied successfully to embedded PostgreSQL engine!');
+    console.log('[ORBIT Database] (Dev mode) All migrations applied successfully to embedded PostgreSQL engine!');
 
     dbInitialized = true;
     return getDbStatus();
   } catch (err: any) {
-    console.warn('Persistent PGlite failed, falling back to in-memory PGlite:', err?.message || err);
-    try {
-      pgliteDb = new PGlite();
-      activeEngine = 'embedded_postgres';
-      await pgliteDb.exec(MIGRATION_SQL);
-      console.log('All migrations applied successfully to in-memory PostgreSQL engine!');
-      dbInitialized = true;
-      return getDbStatus();
-    } catch (inMemErr: any) {
-      console.error('Failed to initialize embedded PostgreSQL engine:', inMemErr);
-      throw inMemErr;
-    }
+    console.warn('[ORBIT Database] (Dev mode) Persistent PGlite failed, falling back to in-memory PGlite for dev:', err?.message || err);
+    const { PGlite } = await import('@electric-sql/pglite');
+    pgliteDb = new PGlite();
+    activeEngine = 'embedded_postgres';
+    await pgliteDb.exec(MIGRATION_SQL);
+    console.log('[ORBIT Database] (Dev mode) Migrations applied to in-memory PostgreSQL engine!');
+    dbInitialized = true;
+    return getDbStatus();
   }
 }
 
@@ -291,13 +364,25 @@ export async function getDbStatus(): Promise<DbStatus> {
         "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' ORDER BY table_name;"
       );
       tables = res.rows.map((r: any) => r.table_name);
-      const url = new URL(process.env.DATABASE_URL || '');
+
+      let host = 'remote-postgres';
+      let database = 'postgres';
+      try {
+        const cleanUrl = cleanDatabaseUrl(process.env.DATABASE_URL);
+        if (cleanUrl) {
+          const url = new URL(cleanUrl);
+          host = url.hostname;
+          database = url.pathname.replace('/', '') || 'postgres';
+        }
+      } catch {
+        // Keep safe defaults if URL cannot be parsed
+      }
 
       return {
         connected: true,
         engine: 'remote_postgres',
-        host: url.hostname,
-        database: url.pathname.replace('/', '') || 'postgres',
+        host,
+        database,
         tables,
         isPlaceholderPassword: false,
         message: 'Connected to remote PostgreSQL database. All schemas and tables verified.',
@@ -308,20 +393,17 @@ export async function getDbStatus(): Promise<DbStatus> {
       );
       tables = (res.rows as any[]).map(r => r.table_name);
 
-      const isPlaceholder =
-        process.env.DATABASE_URL?.includes('YOUR-PASSWORD') ||
-        process.env.DATABASE_URL?.includes('%5BYOUR-PASSWORD%5D') ||
-        false;
+      const isPlaceholder = isPlaceholderDatabaseUrl(cleanDatabaseUrl(process.env.DATABASE_URL));
 
       return {
         connected: true,
         engine: 'embedded_postgres',
-        database: 'orbit_pg (PostgreSQL)',
+        database: 'orbit_pg (Local Dev)',
         tables,
         isPlaceholderPassword: isPlaceholder,
         message: isPlaceholder
-          ? 'PostgreSQL active with embedded instance. Update [YOUR-PASSWORD] in DATABASE_URL anytime to route to remote Supabase.'
-          : 'PostgreSQL active and operational. All tables and migrations are ready.',
+          ? 'PostgreSQL active with embedded local dev instance. Update DATABASE_URL with your Supabase credentials to use remote PostgreSQL.'
+          : 'Local development PostgreSQL active and operational.',
       };
     }
   } catch (err: any) {
