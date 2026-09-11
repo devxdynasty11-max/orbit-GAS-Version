@@ -17,7 +17,12 @@ import {
   loadFullUserState,
   logProgress,
   startFreshJourney,
-  getJourneyHistory
+  getJourneyHistory,
+  ensureUser,
+  getUser,
+  findUserByIdentifier,
+  saveOnboardingDraft,
+  updateUserProfile
 } from "./server/db";
 
 import {
@@ -79,6 +84,71 @@ app.get("/api/user/state", async (req, res) => {
   } catch (err: any) {
     console.error("Error in /api/user/state:", err);
     res.status(500).json({ error: "Failed to load user state from database" });
+  }
+});
+
+// Initialize or verify user session in PostgreSQL
+app.post("/api/user/session/init", async (req, res) => {
+  try {
+    const { userId, name, email } = req.body;
+    if (!userId) {
+      return res.status(400).json({ error: "userId is required" });
+    }
+    await ensureUser(userId, name, email);
+    const state = await loadFullUserState(userId);
+    res.json({ success: true, state });
+  } catch (err: any) {
+    console.error("Error in /api/user/session/init:", err);
+    res.status(500).json({ error: "Failed to initialize user session" });
+  }
+});
+
+// Look up existing user by Email or Account ID (cross-device profile retrieval)
+app.post("/api/user/session/lookup", async (req, res) => {
+  try {
+    const { identifier } = req.body;
+    if (!identifier || typeof identifier !== 'string' || !identifier.trim()) {
+      return res.status(400).json({ error: "Identifier is required" });
+    }
+    const foundUser = await findUserByIdentifier(identifier.trim());
+    if (!foundUser) {
+      return res.json({ found: false });
+    }
+    const state = await loadFullUserState(foundUser.id);
+    res.json({
+      found: true,
+      userId: foundUser.id,
+      user: foundUser,
+      state
+    });
+  } catch (err: any) {
+    console.error("Error in /api/user/session/lookup:", err);
+    res.status(500).json({ error: "Failed to lookup user" });
+  }
+});
+
+// Save incremental onboarding draft step to prevent data loss on refresh or interruption
+app.post("/api/user/onboarding/draft", async (req, res) => {
+  try {
+    const { userId = "default-explorer", step = 0, draftAnswers = {}, name, email } = req.body;
+    await saveOnboardingDraft(userId, Number(step), draftAnswers, name, email);
+    res.json({ success: true, message: "Draft step saved to PostgreSQL" });
+  } catch (err: any) {
+    console.error("Error saving onboarding draft:", err);
+    res.status(500).json({ error: "Failed to save draft progress" });
+  }
+});
+
+// Update user profile details from Settings/Profile modal
+app.post("/api/user/profile/update", async (req, res) => {
+  try {
+    const { userId = "default-explorer", ...profileUpdates } = req.body;
+    await updateUserProfile(userId, profileUpdates);
+    const updatedState = await loadFullUserState(userId);
+    res.json({ success: true, message: "Profile updated successfully", state: updatedState });
+  } catch (err: any) {
+    console.error("Error updating user profile:", err);
+    res.status(500).json({ error: "Failed to update user profile" });
   }
 });
 
@@ -206,6 +276,11 @@ app.post("/api/ai/chat", async (req, res) => {
     const strengths = Array.isArray(userContext?.strengths) ? userContext.strengths.join(", ") : "";
     const hesitations = Array.isArray(userContext?.hesitations) ? userContext.hesitations.join(", ") : "";
     const isRegulated = Boolean(userContext?.isRegulatedProfession);
+    const userName = userContext?.userName || userContext?.name || "";
+    const educationStage = userContext?.educationStage || userContext?.educationLevel || "";
+    const fieldOfStudy = userContext?.fieldOfStudy || "";
+    const learningStyle = userContext?.learningStyle || "";
+    const careerGoal = userContext?.careerGoal || "";
 
     const systemInstruction = `You are ORBIT's dedicated AI Career & Learning Mentor.
 You are NOT a generic search bot or chatbot. You are an experienced, empathetic, highly contextual career guide who understands that deciding a future can feel overwhelming.
@@ -216,6 +291,10 @@ Philosophy & Identity:
 - Your mission is to help the explorer go from confused to understood, then explore, try, choose, learn, build, and grow.
 
 User Current Context:
+${userName ? `- User's Name: ${userName} (speak naturally with them, use their name warmly where appropriate, but do NOT overuse it)` : ""}
+${educationStage ? `- Current Background: ${educationStage}${fieldOfStudy ? ` (Field: ${fieldOfStudy})` : ""}` : ""}
+${learningStyle ? `- Preferred Learning Style: ${learningStyle}` : ""}
+${careerGoal ? `- Primary Career Target: ${careerGoal}` : ""}
 - Target Direction: ${chosenDirection} (${isRegulated ? "Regulated Profession with formal licensing/education requirements" : "Modern practical/tech/creative pathway"})
 - Current Active Stage: ${currentStage}
 - Completed Roadmap Milestones: ${completedCount} completed
@@ -481,11 +560,13 @@ Output strictly valid JSON only without markdown fences or preamble. Exactly 3 r
       data = synthesizeRecommendationsFallback(answers);
     }
 
-    // Persist to PostgreSQL in background
+    // Persist to PostgreSQL deterministically
     const userId = req.body.userId || "default-explorer";
-    saveOnboardingData(userId, answers, data.profile, data.recommendations).catch(e =>
-      console.warn("Could not persist onboarding data to PostgreSQL:", e.message)
-    );
+    try {
+      await saveOnboardingData(userId, answers, data.profile, data.recommendations);
+    } catch (e: any) {
+      console.warn("Could not persist onboarding data to PostgreSQL:", e?.message || e);
+    }
 
     return res.json(data);
   } catch (error: any) {

@@ -19,6 +19,7 @@ import { StartFreshModal } from './components/StartFreshModal';
 import { SettingsProfileModal } from './components/SettingsProfileModal';
 
 const STORAGE_KEY = 'orbit_user_progress_v1';
+const USER_ID_KEY = 'orbit_user_id';
 
 const getInitialState = (): UserProgressState => {
   try {
@@ -51,6 +52,14 @@ const getInitialState = (): UserProgressState => {
 };
 
 export default function App() {
+  const [userId, setUserId] = useState<string>(() => {
+    try {
+      return localStorage.getItem(USER_ID_KEY) || 'default-explorer';
+    } catch {
+      return 'default-explorer';
+    }
+  });
+
   const [userState, setUserState] = useState<UserProgressState>(getInitialState);
   const [currentView, setCurrentView] = useState<'landing' | 'onboarding' | 'recommendations' | 'dashboard'>(() => {
     const saved = getInitialState();
@@ -64,12 +73,23 @@ export default function App() {
   const [isStartFreshOpen, setIsStartFreshOpen] = useState<boolean>(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false);
 
-  // Sync initial state from PostgreSQL on mount
+  // Sync initial state and verify session from PostgreSQL on mount
   useEffect(() => {
-    fetch('/api/user/state?userId=default-explorer')
+    fetch('/api/user/session/init', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId }),
+    })
       .then(res => res.json())
-      .then(dbState => {
-        if (dbState) {
+      .then(data => {
+        if (data && data.state) {
+          if (data.userId && data.userId !== userId) {
+            setUserId(data.userId);
+            try {
+              localStorage.setItem(USER_ID_KEY, data.userId);
+            } catch (e) {}
+          }
+          const dbState = data.state;
           setUserState(prev => ({
             ...prev,
             ...dbState,
@@ -77,6 +97,8 @@ export default function App() {
             projects: dbState.projects?.length ? dbState.projects : prev.projects,
             journeyHistory: dbState.journeyHistory || prev.journeyHistory || [],
           }));
+
+          // Returning users should NEVER have to repeat onboarding
           if (dbState.selectedDirection) {
             setCurrentView('dashboard');
           } else if (dbState.onboardingCompleted) {
@@ -110,10 +132,21 @@ export default function App() {
   };
 
   // 1. Onboarding completion handler
-  const handleOnboardingComplete = (profile: UserProfile, recommendations: Recommendation[]) => {
+  const handleOnboardingComplete = (
+    profile: UserProfile,
+    recommendations: Recommendation[],
+    userMeta?: { fullName?: string; email?: string }
+  ) => {
     setUserState(prev => ({
       ...prev,
       onboardingCompleted: true,
+      user: {
+        id: userId,
+        name: userMeta?.fullName || prev.user?.name || 'Explorer',
+        fullName: userMeta?.fullName || prev.user?.fullName || '',
+        email: userMeta?.email || prev.user?.email || '',
+        ...prev.user,
+      },
       profile,
       recommendations,
     }));
@@ -124,8 +157,14 @@ export default function App() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        userId: 'default-explorer',
-        answers: { profileHeadline: profile.headline, strengths: profile.naturalStrengths },
+        userId,
+        userMeta,
+        answers: {
+          profileHeadline: profile.headline,
+          strengths: profile.naturalStrengths,
+          name: userMeta?.fullName,
+          email: userMeta?.email,
+        },
         profile,
         recommendations,
       }),
@@ -170,7 +209,7 @@ export default function App() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        userId: 'default-explorer',
+        userId,
         recommendationId: recId,
         submission,
       }),
@@ -216,7 +255,7 @@ export default function App() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        userId: 'default-explorer',
+        userId,
         recommendation: rec,
         roadmap: roadmapStages,
       }),
@@ -235,7 +274,7 @@ export default function App() {
         body: JSON.stringify({
           careerGoal,
           profile: userState.profile,
-          userId: 'default-explorer',
+          userId,
         }),
       });
       if (!res.ok) throw new Error('Pathway generation failed');
@@ -287,7 +326,7 @@ export default function App() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        userId: 'default-explorer',
+        userId,
         taskId,
         isCompleted: willBeDone,
       }),
@@ -320,7 +359,7 @@ export default function App() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        userId: 'default-explorer',
+        userId,
         projectId,
         isCompleted: willBeDone,
       }),
@@ -401,7 +440,7 @@ export default function App() {
       const res = await fetch('/api/user/start-fresh', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userId: 'default-explorer' }),
+        body: JSON.stringify({ userId }),
       });
       const data = await res.json();
       if (data.journeyHistory && Array.isArray(data.journeyHistory)) {
@@ -481,6 +520,17 @@ export default function App() {
 
         {currentView === 'onboarding' && (
           <OnboardingFlow
+            userId={userId}
+            initialName={userState.user?.fullName || userState.user?.name}
+            initialDraft={userState.onboardingDraft}
+            initialStep={userState.onboardingStep}
+            onDraftSave={(step, answers) => {
+              setUserState(prev => ({
+                ...prev,
+                onboardingDraft: answers,
+                onboardingStep: step,
+              }));
+            }}
             onComplete={handleOnboardingComplete}
             onCancel={() => setCurrentView('landing')}
           />
@@ -526,6 +576,7 @@ export default function App() {
         isOpen={isMentorOpen}
         onClose={() => setIsMentorOpen(false)}
         userState={userState}
+        userId={userId}
       />
 
       {/* Start Fresh Confirmation Dialog */}
@@ -541,7 +592,25 @@ export default function App() {
         isOpen={isSettingsOpen}
         onClose={() => setIsSettingsOpen(false)}
         userState={userState}
+        userId={userId}
         onOpenStartFresh={() => setIsStartFreshOpen(true)}
+        onProfileUpdated={(updatedState) => {
+          setUserState(prev => ({ ...prev, ...updatedState }));
+        }}
+        onSwitchUser={(newUserId, state) => {
+          setUserId(newUserId);
+          try {
+            localStorage.setItem(USER_ID_KEY, newUserId);
+          } catch (e) {}
+          setUserState(state);
+          if (state.selectedDirection) {
+            setCurrentView('dashboard');
+          } else if (state.onboardingCompleted) {
+            setCurrentView('recommendations');
+          } else {
+            setCurrentView('landing');
+          }
+        }}
       />
 
       {/* Mobile-First Bottom Navigation Bar */}

@@ -12,23 +12,25 @@ interface AIMentorChatProps {
   isOpen: boolean;
   onClose: () => void;
   userState: UserProgressState;
+  userId?: string;
 }
 
-export const AIMentorChat: React.FC<AIMentorChatProps> = ({ isOpen, onClose, userState }) => {
+export const AIMentorChat: React.FC<AIMentorChatProps> = ({ isOpen, onClose, userState, userId = 'default-explorer' }) => {
   const currentStage =
     userState.roadmap.find(s => s.tasks.some(t => !userState.completedTaskIds.includes(t.id))) ||
     userState.roadmap[0];
 
   const chosenPath = userState.selectedDirection?.directionName;
   const isRegulated = userState.selectedDirection?.isRegulatedProfession;
+  const userGreetingName = userState.user?.fullName || userState.user?.name;
 
   const initialGreeting = chosenPath
-    ? `Hey there! I'm your ORBIT Mentor. I see you're currently working through **${currentStage?.title || 'your foundational steps'}** in **${chosenPath}**${
+    ? `Hey ${userGreetingName ? `${userGreetingName} ` : ''}👋 I'm your ORBIT Mentor. I see you're currently working through **${currentStage?.title || 'your foundational steps'}** in **${chosenPath}**${
         isRegulated ? ' (a regulated professional path)' : ''
       }.
 
 How are you feeling about your progress, or what's on your mind right now?`
-    : `Hey 👋 I'm your ORBIT Career & Learning Mentor.
+    : `Hey ${userGreetingName ? `${userGreetingName} ` : ''}👋 I'm your ORBIT Career & Learning Mentor.
 
 Whether you're feeling uncertain about which direction fits your personality, stuck on a concept, or wondering what to build next, I'm right here with you.
 
@@ -95,6 +97,10 @@ What would you like to explore today?`;
         : [];
 
       const userContext = {
+        userName: userState.user?.fullName || userState.user?.name,
+        educationStage: userState.user?.educationLevel,
+        fieldOfStudy: userState.user?.fieldOfStudy,
+        learningStyle: userState.user?.learningStyle,
         chosenDirection: chosenPath || 'Exploring career options',
         careerGoal: userState.selectedDirection?.careerGoal || chosenPath,
         isRegulatedProfession: Boolean(isRegulated),
@@ -115,7 +121,7 @@ What would you like to explore today?`;
         body: JSON.stringify({
           messages: newMessages.map(m => ({ role: m.role, content: m.content })),
           userContext,
-          userId: 'default-explorer',
+          userId,
         }),
       });
 

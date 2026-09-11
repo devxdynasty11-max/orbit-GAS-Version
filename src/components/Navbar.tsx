@@ -149,11 +149,26 @@ export const Navbar: React.FC<NavbarProps> = ({
             <button
               id="navbar-settings-btn"
               onClick={onOpenSettings}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-white hover:bg-neutral-100 border border-[#E2DDD5] text-neutral-700 text-xs font-medium transition shadow-xs"
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full border text-xs font-medium transition shadow-xs ${
+                userState.user?.name && userState.user.name !== 'Explorer'
+                  ? 'bg-purple-50 hover:bg-purple-100 border-purple-200 text-purple-900'
+                  : 'bg-white hover:bg-neutral-100 border-[#E2DDD5] text-neutral-700'
+              }`}
               title="Profile & Settings"
             >
-              <Settings className="w-3.5 h-3.5 text-neutral-600" />
-              <span className="hidden sm:inline">Settings</span>
+              {userState.user?.name && userState.user.name !== 'Explorer' ? (
+                <>
+                  <div className="w-3.5 h-3.5 rounded-full bg-purple-600 text-white flex items-center justify-center text-[9px] font-bold">
+                    {userState.user.name.charAt(0).toUpperCase()}
+                  </div>
+                  <span className="hidden sm:inline max-w-[110px] truncate">{userState.user.name}</span>
+                </>
+              ) : (
+                <>
+                  <Settings className="w-3.5 h-3.5 text-neutral-600" />
+                  <span className="hidden sm:inline">Settings</span>
+                </>
+              )}
             </button>
           )}
 

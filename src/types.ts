@@ -1,11 +1,35 @@
+export interface UserAccount {
+  id: string;
+  name: string;
+  fullName?: string;
+  email?: string;
+  ageRange?: string;
+  educationLevel?: string;
+  fieldOfStudy?: string;
+  currentLevel?: string;
+  targetGoal?: string;
+  learningStyle?: string;
+}
+
 export interface OnboardingAnswers {
+  fullName?: string;
+  name?: string;
+  email?: string;
+  ageRange?: string;
   educationStage: string;
+  educationLevel?: string;
+  fieldOfStudy?: string;
+  currentSkillLevel: string;
+  experienceLevel?: string;
+  existingSkills?: string[];
   freeTimeActivities: string[];
+  curiousTopics?: string[];
+  careerGoal?: string;
+  learningStyle?: string;
   dislikedTasks: string[];
   problemSolvingStyle: string;
   workEnvironment: string;
   priorities: string[];
-  currentSkillLevel: string;
   freeformNotes?: string;
 }
 
@@ -142,7 +166,10 @@ export interface JourneyArchive {
 }
 
 export interface UserProgressState {
+  user?: UserAccount | null;
   onboardingCompleted: boolean;
+  onboardingStep?: number;
+  onboardingDraft?: Partial<OnboardingAnswers> | null;
   sessionNumber?: number;
   profile: UserProfile | null;
   recommendations: Recommendation[];

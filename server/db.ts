@@ -166,6 +166,29 @@ CREATE TABLE IF NOT EXISTS journey_history (
   created_at TIMESTAMPTZ DEFAULT NOW(),
   archived_at TIMESTAMPTZ DEFAULT NOW()
 );
+
+-- Backward-compatible schema extensions for user profile & interactive onboarding
+ALTER TABLE users ADD COLUMN IF NOT EXISTS full_name TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS age_range TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS education_level TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS field_of_study TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS current_level TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS target_goal TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS learning_style TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS onboarding_step INT DEFAULT 0;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS onboarding_completed BOOLEAN DEFAULT FALSE;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS onboarding_draft JSONB;
+
+ALTER TABLE onboarding_responses ADD COLUMN IF NOT EXISTS full_name TEXT;
+ALTER TABLE onboarding_responses ADD COLUMN IF NOT EXISTS age_range TEXT;
+ALTER TABLE onboarding_responses ADD COLUMN IF NOT EXISTS field_of_study TEXT;
+ALTER TABLE onboarding_responses ADD COLUMN IF NOT EXISTS existing_skills JSONB;
+ALTER TABLE onboarding_responses ADD COLUMN IF NOT EXISTS curious_topics JSONB;
+ALTER TABLE onboarding_responses ADD COLUMN IF NOT EXISTS career_goal TEXT;
+ALTER TABLE onboarding_responses ADD COLUMN IF NOT EXISTS learning_style TEXT;
+ALTER TABLE onboarding_responses ADD COLUMN IF NOT EXISTS experience_level TEXT;
+
+CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
 `;
 
 /**
@@ -325,7 +348,24 @@ export async function initDatabase(): Promise<DbStatus> {
     const dataDir = path.join(process.cwd(), 'data', 'orbit_pg');
     fs.mkdirSync(path.dirname(dataDir), { recursive: true });
 
-    pgliteDb = new PGlite(dataDir);
+    let instance: any = null;
+    try {
+      instance = new PGlite(dataDir);
+      await instance.waitReady;
+    } catch (persistentErr: any) {
+      console.warn('[ORBIT Database] (Dev mode) Clearing stale or corrupted PGlite directory and re-initializing at:', dataDir);
+      try {
+        if (instance && typeof instance.close === 'function') {
+          await instance.close().catch(() => {});
+        }
+      } catch {}
+      fs.rmSync(dataDir, { recursive: true, force: true });
+      fs.mkdirSync(dataDir, { recursive: true });
+      instance = new PGlite(dataDir);
+      await instance.waitReady;
+    }
+
+    pgliteDb = instance;
     activeEngine = 'embedded_postgres';
     console.log('[ORBIT Database] (Dev mode) Initialized local embedded PostgreSQL engine at:', dataDir);
 
@@ -335,9 +375,10 @@ export async function initDatabase(): Promise<DbStatus> {
     dbInitialized = true;
     return getDbStatus();
   } catch (err: any) {
-    console.warn('[ORBIT Database] (Dev mode) Persistent PGlite failed, falling back to in-memory PGlite for dev:', err?.message || err);
+    console.warn('[ORBIT Database] (Dev mode) Using in-memory PostgreSQL engine for development session');
     const { PGlite } = await import('@electric-sql/pglite');
     pgliteDb = new PGlite();
+    await pgliteDb.waitReady;
     activeEngine = 'embedded_postgres';
     await pgliteDb.exec(MIGRATION_SQL);
     console.log('[ORBIT Database] (Dev mode) Migrations applied to in-memory PostgreSQL engine!');
@@ -427,12 +468,134 @@ export async function getDbStatus(): Promise<DbStatus> {
  * Ensure user record exists
  */
 export async function ensureUser(userId: string, name?: string, email?: string) {
+  const fallbackName = name && name.trim() ? name.trim() : 'Explorer';
   await dbQuery(
-    `INSERT INTO users (id, name, email) 
-     VALUES ($1, $2, $3) 
-     ON CONFLICT (id) DO UPDATE SET updated_at = NOW()`,
-    [userId, name || 'Explorer', email || null]
+    `INSERT INTO users (id, name, full_name, email) 
+     VALUES ($1, $2, $2, $3) 
+     ON CONFLICT (id) DO UPDATE SET 
+       name = COALESCE(NULLIF($2, ''), users.name),
+       full_name = COALESCE(NULLIF($2, ''), users.full_name, users.name),
+       email = COALESCE(NULLIF($3, ''), users.email),
+       updated_at = NOW()`,
+    [userId, fallbackName, email || null]
   );
+}
+
+/**
+ * Get user profile and account details
+ */
+export async function getUser(userId: string) {
+  await ensureDbReady();
+  const rows = await dbQuery(
+    `SELECT id, email, name, full_name, age_range, education_level, field_of_study, current_level, target_goal, learning_style, onboarding_step, onboarding_completed, onboarding_draft, created_at, updated_at
+     FROM users WHERE id = $1 LIMIT 1`,
+    [userId]
+  );
+  return rows[0] || null;
+}
+
+/**
+ * Lookup user by email or user ID (for returning users across devices)
+ */
+export async function findUserByIdentifier(identifier: string) {
+  await ensureDbReady();
+  const trimmed = identifier ? identifier.trim() : '';
+  if (!trimmed) return null;
+
+  const rows = await dbQuery(
+    `SELECT id, email, name, full_name, onboarding_completed, created_at, updated_at
+     FROM users 
+     WHERE id = $1 OR LOWER(email) = LOWER($1)
+     ORDER BY updated_at DESC LIMIT 1`,
+    [trimmed]
+  );
+  return rows[0] || null;
+}
+
+/**
+ * Save in-progress onboarding draft step
+ */
+export async function saveOnboardingDraft(
+  userId: string,
+  step: number,
+  draftData: any,
+  name?: string,
+  email?: string
+) {
+  await ensureDbReady();
+  await ensureUser(userId, name, email);
+
+  await dbQuery(
+    `UPDATE users 
+     SET onboarding_step = $1,
+         onboarding_draft = $2,
+         name = COALESCE(NULLIF($3, ''), name),
+         full_name = COALESCE(NULLIF($3, ''), full_name, name),
+         email = COALESCE(NULLIF($4, ''), email),
+         updated_at = NOW()
+     WHERE id = $5`,
+    [step, JSON.stringify(draftData || {}), name || null, email || null, userId]
+  );
+}
+
+/**
+ * Update user profile details from Settings/Profile modal
+ */
+export async function updateUserProfile(
+  userId: string,
+  updates: {
+    fullName?: string;
+    email?: string;
+    ageRange?: string;
+    educationLevel?: string;
+    fieldOfStudy?: string;
+    careerGoal?: string;
+    learningStyle?: string;
+    currentLevel?: string;
+    headline?: string;
+    summary?: string;
+  }
+) {
+  await ensureDbReady();
+  await ensureUser(userId, updates.fullName, updates.email);
+
+  await dbQuery(
+    `UPDATE users 
+     SET full_name = COALESCE(NULLIF($1, ''), full_name),
+         name = COALESCE(NULLIF($1, ''), name),
+         email = COALESCE(NULLIF($2, ''), email),
+         age_range = COALESCE(NULLIF($3, ''), age_range),
+         education_level = COALESCE(NULLIF($4, ''), education_level),
+         field_of_study = COALESCE(NULLIF($5, ''), field_of_study),
+         target_goal = COALESCE(NULLIF($6, ''), target_goal),
+         learning_style = COALESCE(NULLIF($7, ''), learning_style),
+         current_level = COALESCE(NULLIF($8, ''), current_level),
+         updated_at = NOW()
+     WHERE id = $9`,
+    [
+      updates.fullName || null,
+      updates.email || null,
+      updates.ageRange || null,
+      updates.educationLevel || null,
+      updates.fieldOfStudy || null,
+      updates.careerGoal || null,
+      updates.learningStyle || null,
+      updates.currentLevel || null,
+      userId,
+    ]
+  );
+
+  if (updates.headline || updates.summary) {
+    await dbQuery(
+      `UPDATE ai_profiles 
+       SET headline = COALESCE(NULLIF($1, ''), headline),
+           summary = COALESCE(NULLIF($2, ''), summary)
+       WHERE user_id = $3`,
+      [updates.headline || null, updates.summary || null, userId]
+    );
+  }
+
+  await logProgress(userId, 'profile_updated', 'Updated personal profile details');
 }
 
 /**
@@ -444,30 +607,70 @@ export async function saveOnboardingData(
   profile: any,
   recommendations: any[]
 ) {
-  await ensureUser(userId);
+  const userName = answers.fullName || answers.name || 'Explorer';
+  await ensureUser(userId, userName, answers.email);
 
-  // 1. Save onboarding responses
+  // 1. Mark onboarding completed in users table with rich discovery attributes
+  await dbQuery(
+    `UPDATE users 
+     SET onboarding_completed = TRUE,
+         onboarding_step = 8,
+         full_name = COALESCE(NULLIF($2, ''), full_name, name),
+         name = COALESCE(NULLIF($2, ''), name),
+         email = COALESCE(NULLIF($3, ''), email),
+         age_range = COALESCE(NULLIF($4, ''), age_range),
+         education_level = COALESCE(NULLIF($5, ''), education_level),
+         field_of_study = COALESCE(NULLIF($6, ''), field_of_study),
+         current_level = COALESCE(NULLIF($7, ''), current_level),
+         target_goal = COALESCE(NULLIF($8, ''), target_goal),
+         learning_style = COALESCE(NULLIF($9, ''), learning_style),
+         onboarding_draft = NULL,
+         updated_at = NOW()
+     WHERE id = $1`,
+    [
+      userId,
+      userName,
+      answers.email || null,
+      answers.ageRange || null,
+      answers.educationStage || answers.educationLevel || null,
+      answers.fieldOfStudy || null,
+      answers.currentSkillLevel || answers.experienceLevel || null,
+      answers.careerGoal || (answers.priorities ? answers.priorities[0] : null),
+      answers.learningStyle || null,
+    ]
+  );
+
+  // 2. Save onboarding responses
   const respId = `resp-${Date.now()}`;
   await dbQuery(
     `INSERT INTO onboarding_responses (
       id, user_id, education_stage, free_time_activities, disliked_tasks,
-      problem_solving_style, work_environment, priorities, current_skill_level, freeform_notes
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+      problem_solving_style, work_environment, priorities, current_skill_level, freeform_notes,
+      full_name, age_range, field_of_study, existing_skills, curious_topics, career_goal, learning_style, experience_level
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)`,
     [
       respId,
       userId,
-      answers.educationStage || '',
+      answers.educationStage || answers.educationLevel || '',
       JSON.stringify(answers.freeTimeActivities || []),
       JSON.stringify(answers.dislikedTasks || []),
       answers.problemSolvingStyle || '',
       answers.workEnvironment || '',
       JSON.stringify(answers.priorities || []),
-      answers.currentSkillLevel || '',
+      answers.currentSkillLevel || answers.experienceLevel || '',
       answers.freeformNotes || null,
+      userName,
+      answers.ageRange || null,
+      answers.fieldOfStudy || null,
+      JSON.stringify(answers.existingSkills || []),
+      JSON.stringify(answers.curiousTopics || []),
+      answers.careerGoal || null,
+      answers.learningStyle || null,
+      answers.experienceLevel || answers.currentSkillLevel || null,
     ]
   );
 
-  // 2. Save structured AI profile
+  // 3. Save structured AI profile
   if (profile) {
     const profId = `prof-${Date.now()}`;
     await dbQuery(
@@ -487,7 +690,7 @@ export async function saveOnboardingData(
     );
   }
 
-  // 3. Save recommendations
+  // 4. Save recommendations
   if (Array.isArray(recommendations)) {
     // Clear previous recommendations for this user to keep exactly 3 current
     await dbQuery('DELETE FROM recommendations WHERE user_id = $1', [userId]);
@@ -516,7 +719,7 @@ export async function saveOnboardingData(
   }
 
   // Log activity
-  await logProgress(userId, 'onboarding_completed', 'Completed conversational onboarding and generated 3 paths');
+  await logProgress(userId, 'onboarding_completed', `Completed discovery for ${userName} and generated 3 paths`);
 }
 
 /**
@@ -818,8 +1021,37 @@ export async function loadFullUserState(userId: string) {
   const journeyHistory = await getJourneyHistory(userId);
   const sessionNumber = journeyHistory.length + 1;
 
+  // 9. User account details and onboarding persistence
+  const userRows = await dbQuery(
+    `SELECT id, name, full_name, email, age_range, education_level, field_of_study, current_level, target_goal, learning_style, onboarding_step, onboarding_completed, onboarding_draft
+     FROM users WHERE id = $1 LIMIT 1`,
+    [userId]
+  );
+  const u = userRows[0];
+  const onboardingCompleted = Boolean(u?.onboarding_completed || profile);
+  let onboardingDraft = null;
+  if (u?.onboarding_draft) {
+    try {
+      onboardingDraft = typeof u.onboarding_draft === 'string' ? JSON.parse(u.onboarding_draft) : u.onboarding_draft;
+    } catch {}
+  }
+
   return {
-    onboardingCompleted: !!profile,
+    user: {
+      id: u?.id || userId,
+      name: u?.full_name || u?.name || 'Explorer',
+      fullName: u?.full_name || u?.name || '',
+      email: u?.email || '',
+      ageRange: u?.age_range || '',
+      educationLevel: u?.education_level || '',
+      fieldOfStudy: u?.field_of_study || '',
+      currentLevel: u?.current_level || '',
+      targetGoal: u?.target_goal || '',
+      learningStyle: u?.learning_style || '',
+    },
+    onboardingCompleted,
+    onboardingStep: u?.onboarding_step || 0,
+    onboardingDraft,
     sessionNumber,
     profile,
     recommendations,
@@ -944,6 +1176,17 @@ export async function startFreshJourney(userId: string) {
   await dbQuery('DELETE FROM roadmaps WHERE user_id = $1', [userId]);
   await dbQuery('DELETE FROM recommendations WHERE user_id = $1', [userId]);
   await dbQuery('DELETE FROM ai_profiles WHERE user_id = $1', [userId]);
+
+  // Reset onboarding status so fresh discovery can begin, but preserve name & email
+  await dbQuery(
+    `UPDATE users 
+     SET onboarding_completed = FALSE,
+         onboarding_step = 0,
+         onboarding_draft = NULL,
+         updated_at = NOW()
+     WHERE id = $1`,
+    [userId]
+  );
 
   // Tag mentor context with a reset notice so the AI looks with fresh eyes
   await dbQuery(
