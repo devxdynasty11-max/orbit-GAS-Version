@@ -22,7 +22,12 @@ import {
   getUser,
   findUserByIdentifier,
   saveOnboardingDraft,
-  updateUserProfile
+  updateUserProfile,
+  createUniqueUser,
+  createSession,
+  validateSession,
+  revokeSession,
+  authenticateWithAccountKey
 } from "./server/db";
 
 import {
@@ -45,6 +50,74 @@ app.use(express.json({ limit: "2mb" }));
 
 // Intercept all requests if ORBIT_MAINTENANCE_MODE=true
 app.use(maintenanceMiddleware);
+
+// Cookie parsing utility
+function parseCookies(req: express.Request): Record<string, string> {
+  const list: Record<string, string> = {};
+  const rc = req.headers.cookie;
+  if (!rc) return list;
+  rc.split(";").forEach((cookie) => {
+    const parts = cookie.split("=");
+    const name = parts.shift()?.trim();
+    if (name) {
+      list[name] = decodeURIComponent(parts.join("="));
+    }
+  });
+  return list;
+}
+
+// Extract verified session token from header or cookie
+function extractSessionToken(req: express.Request): string | null {
+  // 1. Authorization: Bearer <token>
+  const authHeader = req.headers.authorization;
+  if (authHeader && authHeader.startsWith("Bearer ")) {
+    return authHeader.substring(7).trim();
+  }
+  // 2. Custom header x-orbit-session-token
+  const customHeader = req.headers["x-orbit-session-token"];
+  if (typeof customHeader === "string" && customHeader.trim()) {
+    return customHeader.trim();
+  }
+  // 3. Cookie: orbit_session
+  const cookies = parseCookies(req);
+  if (cookies["orbit_session"] && cookies["orbit_session"].trim()) {
+    return cookies["orbit_session"].trim();
+  }
+  return null;
+}
+
+// Global authentication resolver middleware
+app.use(async (req: any, _res, next) => {
+  req.authenticatedUserId = null;
+  req.sessionToken = null;
+  req.authenticatedUser = null;
+
+  const token = extractSessionToken(req);
+  if (token) {
+    try {
+      const session = await validateSession(token);
+      if (session) {
+        req.authenticatedUserId = session.userId;
+        req.sessionToken = token;
+        req.authenticatedUser = session.user;
+      }
+    } catch (err) {
+      console.warn("[Auth] Session validation error:", err);
+    }
+  }
+  next();
+});
+
+// Guard middleware to enforce verified user authentication on protected endpoints
+function requireAuth(req: any, res: express.Response, next: express.NextFunction) {
+  if (!req.authenticatedUserId) {
+    return res.status(401).json({
+      error: "Authentication required",
+      message: "Please initialize or provide a valid authenticated session before accessing protected resources.",
+    });
+  }
+  next();
+}
 
 // Server-side environment configuration
 const NVIDIA_API_KEY = process.env.NVIDIA_API_KEY || "";
@@ -80,10 +153,10 @@ app.get("/api/db/status", async (_req, res) => {
   }
 });
 
-// Load persistent user state from PostgreSQL
-app.get("/api/user/state", async (req, res) => {
+// Load persistent user state for authenticated user from PostgreSQL
+app.get("/api/user/state", requireAuth, async (req: any, res) => {
   try {
-    const userId = (req.query.userId as string) || "default-explorer";
+    const userId = req.authenticatedUserId;
     const state = await loadFullUserState(userId);
     res.json(state);
   } catch (err: any) {
@@ -92,50 +165,101 @@ app.get("/api/user/state", async (req, res) => {
   }
 });
 
-// Initialize or verify user session in PostgreSQL
-app.post("/api/user/session/init", async (req, res) => {
+// Initialize or verify user session in PostgreSQL - issues unique user & session if none exists
+app.post("/api/user/session/init", async (req: any, res) => {
   try {
-    const { userId, name, email } = req.body;
-    if (!userId) {
-      return res.status(400).json({ error: "userId is required" });
+    // If request already has an active, valid authenticated session
+    if (req.authenticatedUserId) {
+      const state = await loadFullUserState(req.authenticatedUserId);
+      return res.json({
+        success: true,
+        userId: req.authenticatedUserId,
+        sessionToken: req.sessionToken,
+        state,
+        isNew: false,
+      });
     }
-    await ensureUser(userId, name, email);
+
+    // Otherwise, generate a brand new unique user identity (never shared default-explorer)
+    const { userId, accountKey } = await createUniqueUser();
+    const session = await createSession(userId);
+
+    // Set HTTP-only secure cookie
+    res.setHeader(
+      "Set-Cookie",
+      `orbit_session=${session.token}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${90 * 24 * 60 * 60}`
+    );
+
     const state = await loadFullUserState(userId);
-    res.json({ success: true, state });
+    res.json({
+      success: true,
+      userId,
+      sessionToken: session.token,
+      accountKey,
+      state,
+      isNew: true,
+    });
   } catch (err: any) {
     console.error("Error in /api/user/session/init:", err);
     res.status(500).json({ error: "Failed to initialize user session" });
   }
 });
 
-// Look up existing user by Email or Account ID (cross-device profile retrieval)
+// Authenticate and resume account using private Account Key or secret Account ID
 app.post("/api/user/session/lookup", async (req, res) => {
   try {
     const { identifier } = req.body;
-    if (!identifier || typeof identifier !== 'string' || !identifier.trim()) {
-      return res.status(400).json({ error: "Identifier is required" });
+    if (!identifier || typeof identifier !== "string" || !identifier.trim()) {
+      return res.status(400).json({ error: "Account Key or ID is required" });
     }
-    const foundUser = await findUserByIdentifier(identifier.trim());
-    if (!foundUser) {
-      return res.json({ found: false });
+    const clean = identifier.trim();
+    // Validate against secret account key or private user ID (never unverified emails)
+    const authResult = await authenticateWithAccountKey(clean);
+    if (!authResult) {
+      return res.status(404).json({ found: false, error: "No account found matching this Account Key or ID" });
     }
-    const state = await loadFullUserState(foundUser.id);
+
+    const session = await createSession(authResult.userId);
+    res.setHeader(
+      "Set-Cookie",
+      `orbit_session=${session.token}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${90 * 24 * 60 * 60}`
+    );
+
+    const state = await loadFullUserState(authResult.userId);
     res.json({
       found: true,
-      userId: foundUser.id,
-      user: foundUser,
-      state
+      success: true,
+      userId: authResult.userId,
+      sessionToken: session.token,
+      user: authResult.user,
+      state,
     });
   } catch (err: any) {
     console.error("Error in /api/user/session/lookup:", err);
-    res.status(500).json({ error: "Failed to lookup user" });
+    res.status(500).json({ error: "Failed to authenticate account" });
+  }
+});
+
+// Logout: Revoke current session and clear cookie
+app.post("/api/user/session/logout", async (req: any, res) => {
+  try {
+    const token = extractSessionToken(req);
+    if (token) {
+      await revokeSession(token);
+    }
+    res.setHeader("Set-Cookie", "orbit_session=; HttpOnly; Path=/; Max-Age=0");
+    res.json({ success: true, message: "Logged out successfully" });
+  } catch (err: any) {
+    console.error("Error in /api/user/session/logout:", err);
+    res.status(500).json({ error: "Failed to logout" });
   }
 });
 
 // Save incremental onboarding draft step to prevent data loss on refresh or interruption
-app.post("/api/user/onboarding/draft", async (req, res) => {
+app.post("/api/user/onboarding/draft", requireAuth, async (req: any, res) => {
   try {
-    const { userId = "default-explorer", step = 0, draftAnswers = {}, name, email } = req.body;
+    const userId = req.authenticatedUserId;
+    const { step = 0, draftAnswers = {}, name, email } = req.body;
     await saveOnboardingDraft(userId, Number(step), draftAnswers, name, email);
     res.json({ success: true, message: "Draft step saved to PostgreSQL" });
   } catch (err: any) {
@@ -145,9 +269,11 @@ app.post("/api/user/onboarding/draft", async (req, res) => {
 });
 
 // Update user profile details from Settings/Profile modal
-app.post("/api/user/profile/update", async (req, res) => {
+app.post("/api/user/profile/update", requireAuth, async (req: any, res) => {
   try {
-    const { userId = "default-explorer", ...profileUpdates } = req.body;
+    const userId = req.authenticatedUserId;
+    const { ...profileUpdates } = req.body;
+    delete (profileUpdates as any).userId; // Ensure client cannot override user ID
     await updateUserProfile(userId, profileUpdates);
     const updatedState = await loadFullUserState(userId);
     res.json({ success: true, message: "Profile updated successfully", state: updatedState });
@@ -158,9 +284,10 @@ app.post("/api/user/profile/update", async (req, res) => {
 });
 
 // Persist onboarding and recommendations to PostgreSQL
-app.post("/api/user/onboarding", async (req, res) => {
+app.post("/api/user/onboarding", requireAuth, async (req: any, res) => {
   try {
-    const { userId = "default-explorer", answers, profile, recommendations } = req.body;
+    const userId = req.authenticatedUserId;
+    const { answers, profile, recommendations } = req.body;
     if (!answers || !profile || !recommendations) {
       return res.status(400).json({ error: "Missing required onboarding data" });
     }
@@ -173,9 +300,10 @@ app.post("/api/user/onboarding", async (req, res) => {
 });
 
 // Persist selected path and generated roadmap to PostgreSQL
-app.post("/api/user/select-path", async (req, res) => {
+app.post("/api/user/select-path", requireAuth, async (req: any, res) => {
   try {
-    const { userId = "default-explorer", recommendation, roadmap } = req.body;
+    const userId = req.authenticatedUserId;
+    const { recommendation, roadmap } = req.body;
     if (!recommendation || !roadmap) {
       return res.status(400).json({ error: "Missing recommendation or roadmap" });
     }
@@ -188,9 +316,10 @@ app.post("/api/user/select-path", async (req, res) => {
 });
 
 // Toggle roadmap task completion in PostgreSQL
-app.post("/api/user/task-toggle", async (req, res) => {
+app.post("/api/user/task-toggle", requireAuth, async (req: any, res) => {
   try {
-    const { userId = "default-explorer", taskId, isCompleted } = req.body;
+    const userId = req.authenticatedUserId;
+    const { taskId, isCompleted } = req.body;
     if (!taskId) return res.status(400).json({ error: "Task ID is required" });
     await toggleTaskInDb(userId, taskId, isCompleted);
     res.json({ success: true });
@@ -201,9 +330,10 @@ app.post("/api/user/task-toggle", async (req, res) => {
 });
 
 // Toggle project completion in PostgreSQL
-app.post("/api/user/project-toggle", async (req, res) => {
+app.post("/api/user/project-toggle", requireAuth, async (req: any, res) => {
   try {
-    const { userId = "default-explorer", projectId, isCompleted } = req.body;
+    const userId = req.authenticatedUserId;
+    const { projectId, isCompleted } = req.body;
     if (!projectId) return res.status(400).json({ error: "Project ID is required" });
     await toggleProjectInDb(userId, projectId, isCompleted);
     res.json({ success: true });
@@ -214,9 +344,10 @@ app.post("/api/user/project-toggle", async (req, res) => {
 });
 
 // Save challenge reflection to PostgreSQL
-app.post("/api/user/challenge-reflection", async (req, res) => {
+app.post("/api/user/challenge-reflection", requireAuth, async (req: any, res) => {
   try {
-    const { userId = "default-explorer", recommendationId, submission } = req.body;
+    const userId = req.authenticatedUserId;
+    const { recommendationId, submission } = req.body;
     if (!recommendationId || !submission) {
       return res.status(400).json({ error: "Missing required challenge reflection data" });
     }
@@ -229,9 +360,9 @@ app.post("/api/user/challenge-reflection", async (req, res) => {
 });
 
 // Fetch AI Mentor chat history from PostgreSQL
-app.get("/api/user/chat-history", async (req, res) => {
+app.get("/api/user/chat-history", requireAuth, async (req: any, res) => {
   try {
-    const userId = (req.query.userId as string) || "default-explorer";
+    const userId = req.authenticatedUserId;
     const history = await getMentorHistory(userId);
     res.json({ history });
   } catch (err: any) {
@@ -240,9 +371,9 @@ app.get("/api/user/chat-history", async (req, res) => {
 });
 
 // START FRESH: Safely archive current journey, preserve history & reset active session
-app.post("/api/user/start-fresh", async (req, res) => {
+app.post("/api/user/start-fresh", requireAuth, async (req: any, res) => {
   try {
-    const userId = req.body.userId || "default-explorer";
+    const userId = req.authenticatedUserId;
     const result = await startFreshJourney(userId);
     res.json(result);
   } catch (err: any) {
@@ -252,9 +383,9 @@ app.post("/api/user/start-fresh", async (req, res) => {
 });
 
 // Fetch historical journeys
-app.get("/api/user/journey-history", async (req, res) => {
+app.get("/api/user/journey-history", requireAuth, async (req: any, res) => {
   try {
-    const userId = (req.query.userId as string) || "default-explorer";
+    const userId = req.authenticatedUserId;
     const history = await getJourneyHistory(userId);
     res.json({ journeys: history });
   } catch (err: any) {
@@ -263,29 +394,38 @@ app.get("/api/user/journey-history", async (req, res) => {
 });
 
 // 1. AI Chat Route for Contextual Mentor & Career Guide
-app.post("/api/ai/chat", async (req, res) => {
+app.post("/api/ai/chat", requireAuth, async (req: any, res) => {
   try {
-    const { messages, userContext } = req.body;
+    const { messages } = req.body;
     if (!messages || !Array.isArray(messages)) {
       return res.status(400).json({ error: "Messages array is required." });
     }
 
-    const userId = req.body.userId || "default-explorer";
+    const userId = req.authenticatedUserId;
     const lastUserMsg = messages[messages.length - 1]?.content || "";
 
-    // Contextual Mentor Persona
-    const chosenDirection = userContext?.chosenDirection || "Exploring career paths";
-    const currentStage = userContext?.currentStage || "Foundation";
-    const completedCount = userContext?.completedTasksCount ?? 0;
-    const profileSummary = userContext?.profileSummary || "";
-    const strengths = Array.isArray(userContext?.strengths) ? userContext.strengths.join(", ") : "";
-    const hesitations = Array.isArray(userContext?.hesitations) ? userContext.hesitations.join(", ") : "";
-    const isRegulated = Boolean(userContext?.isRegulatedProfession);
-    const userName = userContext?.userName || userContext?.name || "";
-    const educationStage = userContext?.educationStage || userContext?.educationLevel || "";
-    const fieldOfStudy = userContext?.fieldOfStudy || "";
-    const learningStyle = userContext?.learningStyle || "";
-    const careerGoal = userContext?.careerGoal || "";
+    // Load authentic user context directly from DB to prevent cross-user leakage or spoofing
+    const userState = await loadFullUserState(userId);
+    const chosenDirection = userState?.selectedDirection?.directionName || "Exploring career paths";
+    const currentStageObj =
+      userState?.roadmap?.find((s: any) =>
+        Array.isArray(s.tasks) && s.tasks.some((t: any) => !userState.completedTaskIds?.includes(t.id))
+      ) || userState?.roadmap?.[0];
+    const currentStage = currentStageObj?.title || "Foundation";
+    const completedCount = userState?.completedTaskIds?.length || 0;
+    const profileSummary = userState?.profile?.summary || userState?.profile?.headline || "";
+    const strengths = Array.isArray(userState?.profile?.naturalStrengths)
+      ? userState.profile.naturalStrengths.join(", ")
+      : "";
+    const hesitations = Array.isArray(userState?.profile?.thingsToAvoid)
+      ? userState.profile.thingsToAvoid.join(", ")
+      : "";
+    const isRegulated = Boolean(userState?.selectedDirection?.isRegulatedProfession);
+    const userName = userState?.user?.fullName || userState?.user?.name || "";
+    const educationStage = userState?.user?.educationLevel || "";
+    const fieldOfStudy = userState?.user?.fieldOfStudy || "";
+    const learningStyle = userState?.user?.learningStyle || "";
+    const careerGoal = userState?.selectedDirection?.careerGoal || chosenDirection;
 
     const systemInstruction = `You are ORBIT's dedicated AI Career & Learning Mentor.
 You are NOT a generic search bot or chatbot. You are an experienced, empathetic, highly contextual career guide who understands that deciding a future can feel overwhelming.
@@ -345,7 +485,7 @@ Mentor Interaction Rules:
       }
     }
 
-    // Persist conversation turn in PostgreSQL
+    // Persist conversation turn in PostgreSQL for the authenticated user only
     if (lastUserMsg) {
       saveMentorMessage(userId, "user", lastUserMsg, currentStage).catch((e) =>
         console.warn("Could not persist user chat message to DB:", e.message)
@@ -366,9 +506,10 @@ Mentor Interaction Rules:
 });
 
 // 1b. Dynamic Career Pathway Generator (Supports ANY career goal & regulated professions)
-app.post("/api/ai/generate-career-pathway", async (req, res) => {
+app.post("/api/ai/generate-career-pathway", requireAuth, async (req: any, res) => {
   try {
-    const { careerGoal, profile, userId = "default-explorer" } = req.body;
+    const { careerGoal, profile } = req.body;
+    const userId = req.authenticatedUserId;
     if (!careerGoal || typeof careerGoal !== "string" || careerGoal.trim().length === 0) {
       return res.status(400).json({ error: "Career goal is required." });
     }
@@ -491,9 +632,10 @@ Output strictly valid JSON only:
 });
 
 // 2. Generate Profile and 3 Recommendations from Onboarding Answers
-app.post("/api/ai/generate-recommendations", async (req, res) => {
+app.post("/api/ai/generate-recommendations", requireAuth, async (req: any, res) => {
   try {
     const { answers } = req.body;
+    const userId = req.authenticatedUserId;
     if (!answers) {
       return res.status(400).json({ error: "Onboarding answers are required." });
     }
@@ -576,8 +718,7 @@ Output strictly valid JSON only without markdown fences or preamble. Exactly 3 r
       data = synthesizeRecommendationsFallback(answers);
     }
 
-    // Persist to PostgreSQL deterministically
-    const userId = req.body.userId || "default-explorer";
+    // Persist to PostgreSQL deterministically for authenticated user
     try {
       await saveOnboardingData(userId, answers, data.profile, data.recommendations);
     } catch (e: any) {
@@ -593,7 +734,7 @@ Output strictly valid JSON only without markdown fences or preamble. Exactly 3 r
 });
 
 // 3. Generate 7-Stage Personalized Roadmap & Learning Projects
-app.post("/api/ai/generate-roadmap", async (req, res) => {
+app.post("/api/ai/generate-roadmap", requireAuth, async (req: any, res) => {
   try {
     const { direction, profile } = req.body;
     if (!direction) {
@@ -679,7 +820,7 @@ Respond ONLY in valid JSON matching:
 });
 
 // 4. Challenge Feedback Route
-app.post("/api/ai/challenge-feedback", async (req, res) => {
+app.post("/api/ai/challenge-feedback", requireAuth, async (req: any, res) => {
   try {
     const { direction, challengeTitle, userSubmission, reflection } = req.body;
 

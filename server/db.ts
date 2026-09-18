@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import crypto from 'crypto';
 import { Pool } from 'pg';
 
 export interface DbStatus {
@@ -189,6 +190,20 @@ ALTER TABLE onboarding_responses ADD COLUMN IF NOT EXISTS learning_style TEXT;
 ALTER TABLE onboarding_responses ADD COLUMN IF NOT EXISTS experience_level TEXT;
 
 CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+
+ALTER TABLE users ADD COLUMN IF NOT EXISTS account_key TEXT;
+
+CREATE TABLE IF NOT EXISTS user_sessions (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  token TEXT NOT NULL UNIQUE,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  last_active_at TIMESTAMPTZ DEFAULT NOW(),
+  expires_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_sessions_token ON user_sessions(token);
+CREATE INDEX IF NOT EXISTS idx_user_sessions_user_id ON user_sessions(user_id);
 `;
 
 /**
@@ -422,18 +437,107 @@ export async function getDbStatus(): Promise<DbStatus> {
 /**
  * Ensure user record exists
  */
-export async function ensureUser(userId: string, name?: string, email?: string) {
+export async function ensureUser(userId: string, name?: string, email?: string, accountKey?: string) {
   const fallbackName = name && name.trim() ? name.trim() : 'Explorer';
   await dbQuery(
-    `INSERT INTO users (id, name, full_name, email) 
-     VALUES ($1, $2, $2, $3) 
+    `INSERT INTO users (id, name, full_name, email, account_key) 
+     VALUES ($1, $2, $2, $3, $4) 
      ON CONFLICT (id) DO UPDATE SET 
        name = COALESCE(NULLIF($2, ''), users.name),
        full_name = COALESCE(NULLIF($2, ''), users.full_name, users.name),
        email = COALESCE(NULLIF($3, ''), users.email),
+       account_key = COALESCE(NULLIF($4, ''), users.account_key),
        updated_at = NOW()`,
-    [userId, fallbackName, email || null]
+    [userId, fallbackName, email || null, accountKey || null]
   );
+}
+
+/**
+ * Create a new unique user with cryptographically random ID and account secret key
+ */
+export async function createUniqueUser(name?: string, email?: string): Promise<{ userId: string; accountKey: string }> {
+  await ensureDbReady();
+  const userId = 'usr_' + crypto.randomBytes(12).toString('hex');
+  const accountKey = 'key_' + crypto.randomBytes(16).toString('hex');
+  await ensureUser(userId, name, email, accountKey);
+  return { userId, accountKey };
+}
+
+/**
+ * Create a new session token for a user
+ */
+export async function createSession(userId: string): Promise<{ token: string; expiresAt: Date }> {
+  await ensureDbReady();
+  const token = 'orbit_tok_' + crypto.randomBytes(32).toString('hex');
+  const sessionId = 'sess_' + crypto.randomBytes(12).toString('hex');
+  const expiresAt = new Date(Date.now() + 90 * 24 * 60 * 60 * 1000); // 90 days
+
+  await dbQuery(
+    `INSERT INTO user_sessions (id, user_id, token, created_at, last_active_at, expires_at)
+     VALUES ($1, $2, $3, NOW(), NOW(), $4)`,
+    [sessionId, userId, token, expiresAt]
+  );
+  return { token, expiresAt };
+}
+
+/**
+ * Validate session token and return user info if valid and active
+ */
+export async function validateSession(token: string): Promise<{ userId: string; user: any } | null> {
+  if (!token || typeof token !== 'string') return null;
+  await ensureDbReady();
+  const clean = token.trim();
+  if (!clean) return null;
+
+  const rows = await dbQuery(
+    `SELECT s.user_id, s.expires_at, u.id, u.name, u.full_name, u.email, u.account_key
+     FROM user_sessions s
+     JOIN users u ON u.id = s.user_id
+     WHERE s.token = $1 AND s.expires_at > NOW()
+     LIMIT 1`,
+    [clean]
+  );
+  if (!rows || rows.length === 0) return null;
+
+  // Non-blocking update of last_active_at
+  dbQuery('UPDATE user_sessions SET last_active_at = NOW() WHERE token = $1', [clean]).catch(() => {});
+
+  return {
+    userId: rows[0].user_id,
+    user: rows[0],
+  };
+}
+
+/**
+ * Revoke/delete a session token (on logout)
+ */
+export async function revokeSession(token: string): Promise<void> {
+  if (!token || typeof token !== 'string') return;
+  await ensureDbReady();
+  await dbQuery('DELETE FROM user_sessions WHERE token = $1', [token.trim()]);
+}
+
+/**
+ * Authenticate with exact Account Key or Private Account ID
+ */
+export async function authenticateWithAccountKey(identifierOrKey: string): Promise<{ userId: string; user: any } | null> {
+  if (!identifierOrKey || typeof identifierOrKey !== 'string') return null;
+  const clean = identifierOrKey.trim();
+  if (!clean) return null;
+  await ensureDbReady();
+
+  const rows = await dbQuery(
+    `SELECT id, name, full_name, email, account_key
+     FROM users
+     WHERE (account_key = $1 OR id = $1)
+     LIMIT 1`,
+    [clean]
+  );
+  if (!rows || rows.length === 0) return null;
+  return {
+    userId: rows[0].id,
+    user: rows[0],
+  };
 }
 
 /**
@@ -505,6 +609,7 @@ export async function updateUserProfile(
     educationLevel?: string;
     fieldOfStudy?: string;
     careerGoal?: string;
+    targetGoal?: string;
     learningStyle?: string;
     currentLevel?: string;
     headline?: string;
@@ -513,6 +618,8 @@ export async function updateUserProfile(
 ) {
   await ensureDbReady();
   await ensureUser(userId, updates.fullName, updates.email);
+
+  const goal = updates.careerGoal || updates.targetGoal || null;
 
   await dbQuery(
     `UPDATE users 
@@ -533,7 +640,7 @@ export async function updateUserProfile(
       updates.ageRange || null,
       updates.educationLevel || null,
       updates.fieldOfStudy || null,
-      updates.careerGoal || null,
+      goal,
       updates.learningStyle || null,
       updates.currentLevel || null,
       userId,
@@ -651,13 +758,25 @@ export async function saveOnboardingData(
     await dbQuery('DELETE FROM recommendations WHERE user_id = $1', [userId]);
 
     for (const rec of recommendations) {
+      const rawId = rec.id || `rec-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+      const scopedId = rawId.startsWith(userId + '_') ? rawId : `${userId}_${rawId}`;
       await dbQuery(
         `INSERT INTO recommendations (
           id, user_id, direction_name, tagline, simple_explanation, why_it_fits_you,
           day_in_the_life, beginner_skills, future_opportunities, challenge, comparison
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        ON CONFLICT (id) DO UPDATE SET
+          direction_name = EXCLUDED.direction_name,
+          tagline = EXCLUDED.tagline,
+          simple_explanation = EXCLUDED.simple_explanation,
+          why_it_fits_you = EXCLUDED.why_it_fits_you,
+          day_in_the_life = EXCLUDED.day_in_the_life,
+          beginner_skills = EXCLUDED.beginner_skills,
+          future_opportunities = EXCLUDED.future_opportunities,
+          challenge = EXCLUDED.challenge,
+          comparison = EXCLUDED.comparison`,
         [
-          rec.id || `rec-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+          scopedId,
           userId,
           rec.directionName || 'Career Direction',
           rec.tagline || 'Explore what fits you best',
@@ -725,10 +844,16 @@ export async function saveSelectedPathAndRoadmap(
 
     if (Array.isArray(stg.tasks)) {
       for (const t of stg.tasks) {
+        const rawTaskId = t.id || `task-${Date.now()}`;
+        const scopedTaskId = rawTaskId.startsWith(userId + '_') ? rawTaskId : `${userId}_${rawTaskId}`;
         await dbQuery(
           `INSERT INTO roadmap_tasks (id, user_id, roadmap_id, stage_number, task_text, is_completed)
-           VALUES ($1, $2, $3, $4, $5, $6)`,
-          [t.id, userId, stageId, stg.stageNumber, t.text, false]
+           VALUES ($1, $2, $3, $4, $5, $6)
+           ON CONFLICT (id) DO UPDATE SET
+             roadmap_id = EXCLUDED.roadmap_id,
+             stage_number = EXCLUDED.stage_number,
+             task_text = EXCLUDED.task_text`,
+          [scopedTaskId, userId, stageId, stg.stageNumber, t.text, false]
         );
       }
     }
@@ -742,14 +867,15 @@ export async function saveSelectedPathAndRoadmap(
  * Toggle task completion status
  */
 export async function toggleTaskInDb(userId: string, taskId: string, isCompleted: boolean) {
+  const scopedTaskId = taskId.startsWith(userId + '_') ? taskId : `${userId}_${taskId}`;
   await dbQuery(
     `UPDATE roadmap_tasks 
      SET is_completed = $1, completed_at = CASE WHEN $1 = TRUE THEN NOW() ELSE NULL END
-     WHERE id = $2 AND user_id = $3`,
-    [isCompleted, taskId, userId]
+     WHERE (id = $2 OR id = $3) AND user_id = $4`,
+    [isCompleted, scopedTaskId, taskId, userId]
   );
 
-  const taskRows = await dbQuery('SELECT task_text FROM roadmap_tasks WHERE id = $1', [taskId]);
+  const taskRows = await dbQuery('SELECT task_text FROM roadmap_tasks WHERE (id = $1 OR id = $2) AND user_id = $3', [scopedTaskId, taskId, userId]);
   const taskName = taskRows[0]?.task_text || taskId;
 
   await logProgress(
@@ -763,13 +889,14 @@ export async function toggleTaskInDb(userId: string, taskId: string, isCompleted
  * Toggle project completion status
  */
 export async function toggleProjectInDb(userId: string, projectId: string, isCompleted: boolean) {
+  const scopedProjectId = projectId.startsWith(userId + '_') ? projectId : `${userId}_${projectId}`;
   // Upsert project record
   await dbQuery(
     `INSERT INTO projects (id, user_id, title, level, objective, skills_practiced, expected_output, difficulty, is_completed, completed_at)
      VALUES ($1, $2, $3, 'Custom', '', '[]'::jsonb, '', '', $4, CASE WHEN $4 = TRUE THEN NOW() ELSE NULL END)
      ON CONFLICT (id) DO UPDATE 
-     SET is_completed = $4, completed_at = CASE WHEN $4 = TRUE THEN NOW() ELSE NULL END`,
-    [projectId, userId, projectId, isCompleted]
+     SET is_completed = $4, completed_at = CASE WHEN $4 = TRUE THEN NOW() ELSE NULL END, user_id = $2`,
+    [scopedProjectId, userId, projectId, isCompleted]
   );
 
   await logProgress(
@@ -883,7 +1010,7 @@ export async function loadFullUserState(userId: string) {
     [userId]
   );
   const recommendations = recRows.map((r: any) => ({
-    id: r.id,
+    id: r.id.startsWith(userId + '_') ? r.id.slice(userId.length + 1) : r.id,
     directionName: r.direction_name,
     tagline: r.tagline,
     simpleExplanation: r.simple_explanation,
@@ -903,8 +1030,13 @@ export async function loadFullUserState(userId: string) {
   let selectedDirection = null;
   if (pathRows[0]) {
     const p = pathRows[0];
-    selectedDirection = recommendations.find(r => r.id === p.recommendation_id) || {
-      id: p.recommendation_id || 'custom-path',
+    const rawTargetRecId = p.recommendation_id;
+    const cleanTargetRecId = rawTargetRecId && rawTargetRecId.startsWith(userId + '_') 
+      ? rawTargetRecId.slice(userId.length + 1) 
+      : rawTargetRecId;
+
+    selectedDirection = recommendations.find(r => r.id === cleanTargetRecId || r.id === rawTargetRecId) || {
+      id: cleanTargetRecId || 'custom-path',
       directionName: p.direction_name,
       tagline: p.tagline,
     };
@@ -920,7 +1052,9 @@ export async function loadFullUserState(userId: string) {
     [userId]
   );
 
-  const completedTaskIds = taskRows.filter((t: any) => t.is_completed).map((t: any) => t.id);
+  const completedTaskIds = taskRows
+    .filter((t: any) => t.is_completed)
+    .map((t: any) => (t.id.startsWith(userId + '_') ? t.id.slice(userId.length + 1) : t.id));
 
   const roadmap = roadmapRows.map((stg: any) => ({
     id: stg.id,
@@ -935,7 +1069,10 @@ export async function loadFullUserState(userId: string) {
     whatSuccessLooksLike: stg.what_success_looks_like,
     tasks: taskRows
       .filter((t: any) => t.stage_number === stg.stage_number)
-      .map((t: any) => ({ id: t.id, text: t.task_text })),
+      .map((t: any) => ({ 
+        id: t.id.startsWith(userId + '_') ? t.id.slice(userId.length + 1) : t.id, 
+        text: t.task_text 
+      })),
   }));
 
   // 5. Projects
@@ -943,7 +1080,9 @@ export async function loadFullUserState(userId: string) {
     `SELECT * FROM projects WHERE user_id = $1 AND is_completed = TRUE`,
     [userId]
   );
-  const completedProjectIds = projectRows.map((p: any) => p.id);
+  const completedProjectIds = projectRows.map((p: any) => 
+    p.id.startsWith(userId + '_') ? p.id.slice(userId.length + 1) : p.id
+  );
 
   // 6. Challenge reflections
   const reflections = await dbQuery(

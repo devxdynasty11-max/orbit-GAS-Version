@@ -54,9 +54,10 @@ const getInitialState = (): UserProgressState => {
 export default function App() {
   const [userId, setUserId] = useState<string>(() => {
     try {
-      return localStorage.getItem(USER_ID_KEY) || 'default-explorer';
+      const stored = localStorage.getItem(USER_ID_KEY);
+      return stored && stored !== 'default-explorer' ? stored : '';
     } catch {
-      return 'default-explorer';
+      return '';
     }
   });
 
@@ -78,12 +79,12 @@ export default function App() {
     fetch('/api/user/session/init', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ userId }),
+      body: JSON.stringify({ userId: userId || undefined }),
     })
       .then(res => res.json())
       .then(data => {
         if (data && data.state) {
-          if (data.userId && data.userId !== userId) {
+          if (data.userId) {
             setUserId(data.userId);
             try {
               localStorage.setItem(USER_ID_KEY, data.userId);

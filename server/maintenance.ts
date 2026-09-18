@@ -5,8 +5,9 @@ import type { Request, Response, NextFunction } from "express";
  * Enabled when ORBIT_MAINTENANCE_MODE is 'true', '1', 'yes', or 'on'.
  */
 export function isMaintenanceMode(): boolean {
-  const val = (process.env.ORBIT_MAINTENANCE_MODE || "").trim().toLowerCase();
-  return val === "true" || val === "1" || val === "yes" || val === "on";
+  const raw = process.env.ORBIT_MAINTENANCE_MODE ?? "true";
+  const val = raw.trim().toLowerCase();
+  return val !== "false" && val !== "0" && val !== "off" && val !== "no";
 }
 
 /**
