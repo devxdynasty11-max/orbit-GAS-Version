@@ -34,12 +34,17 @@ import {
   synthesizeCareerPathwayFallback
 } from "./server/ai";
 
+import { maintenanceMiddleware, isMaintenanceMode } from "./server/maintenance";
+
 dotenv.config();
 
 const app = express();
 const PORT = 3000;
 
 app.use(express.json({ limit: "2mb" }));
+
+// Intercept all requests if ORBIT_MAINTENANCE_MODE=true
+app.use(maintenanceMiddleware);
 
 // Server-side environment configuration
 const NVIDIA_API_KEY = process.env.NVIDIA_API_KEY || "";
@@ -756,6 +761,9 @@ async function startServer() {
 
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`ORBIT server running on http://0.0.0.0:${PORT}`);
+    if (isMaintenanceMode()) {
+      console.log("⚠️  [ORBIT Server] MAINTENANCE MODE IS ACTIVE (ORBIT_MAINTENANCE_MODE=true). HTTP 503 served for all user/API requests.");
+    }
   });
 }
 
