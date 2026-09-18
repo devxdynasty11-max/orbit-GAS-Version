@@ -272,13 +272,54 @@ export async function initDatabase(): Promise<DbStatus> {
     return getDbStatus();
   }
 
+  const isProd = isProductionEnvironment();
   const rawUrl = process.env.DATABASE_URL;
   const dbUrl = cleanDatabaseUrl(rawUrl);
 
-  // 1. If remote DATABASE_URL is provided, attempt connection
+  // 1. PRODUCTION DATABASE ENFORCEMENT:
+  // Render production strictly requires Supabase / remote PostgreSQL.
+  // Silently falling back to an embedded/local database in production is strictly prohibited.
+  if (isProd) {
+    if (!dbUrl || isPlaceholderDatabaseUrl(dbUrl)) {
+      throw new Error(
+        '[FATAL PRODUCTION DATABASE ERROR] DATABASE_URL is missing, unconfigured, or contains placeholder credentials in production environment. ' +
+        'ORBIT production strictly requires a valid remote PostgreSQL/Supabase database. Local embedded database (PGlite) fallback is strictly prohibited in production.'
+      );
+    }
+
+    try {
+      console.log('[ORBIT Database] [PRODUCTION] Connecting to remote Supabase/PostgreSQL database...');
+      const pool = new Pool({
+        connectionString: dbUrl,
+        ssl: { rejectUnauthorized: false },
+        max: 10,
+        idleTimeoutMillis: 30000,
+        connectionTimeoutMillis: 10000,
+      });
+
+      await pool.query('SELECT 1 as test');
+      pgPool = pool;
+      activeEngine = 'remote_postgres';
+      console.log('[ORBIT Database] [PRODUCTION] Connected to remote PostgreSQL successfully!');
+
+      await pgPool.query(MIGRATION_SQL);
+      console.log('[ORBIT Database] [PRODUCTION] Migrations verified on remote PostgreSQL!');
+
+      dbInitialized = true;
+      return getDbStatus();
+    } catch (err: any) {
+      throw new Error(
+        `[FATAL PRODUCTION DATABASE ERROR] Failed to connect to remote PostgreSQL/Supabase database: ${err.message}. ` +
+        `Application startup aborted. Local embedded database fallback is strictly prohibited in production to prevent data divergence.`
+      );
+    }
+  }
+
+  // 2. LOCAL / AI STUDIO DEVELOPMENT:
+  // In development, attempt remote PostgreSQL if configured; otherwise use embedded PGlite for local testing.
   if (dbUrl && !isPlaceholderDatabaseUrl(dbUrl)) {
     try {
-      console.log('[ORBIT Database] Testing remote PostgreSQL connection via DATABASE_URL...');
+      console.log('[ORBIT Database] [DEV] Testing remote PostgreSQL connection via DATABASE_URL...');
       const pool = new Pool({
         connectionString: dbUrl,
         ssl: { rejectUnauthorized: false },
@@ -290,19 +331,21 @@ export async function initDatabase(): Promise<DbStatus> {
       await pool.query('SELECT 1 as test');
       pgPool = pool;
       activeEngine = 'remote_postgres';
-      console.log('[ORBIT Database] Connected to remote PostgreSQL successfully!');
+      console.log('[ORBIT Database] [DEV] Connected to remote PostgreSQL successfully!');
 
       await pgPool.query(MIGRATION_SQL);
-      console.log('[ORBIT Database] Migrations applied successfully to remote PostgreSQL!');
+      console.log('[ORBIT Database] [DEV] Migrations applied successfully to remote PostgreSQL!');
 
       dbInitialized = true;
       return getDbStatus();
     } catch (err: any) {
-      console.warn('[ORBIT Database] Remote PostgreSQL connection failed, falling back to embedded PostgreSQL:', err.message);
+      console.warn('[ORBIT Database] [DEV] Remote PostgreSQL connection failed in dev, falling back to embedded PostgreSQL:', err.message);
     }
+  } else {
+    console.log('[ORBIT Database] [DEV] Development environment detected without configured remote DATABASE_URL (or placeholder detected). Using local embedded PostgreSQL (PGlite) for development.');
   }
 
-  // 2. Embedded PostgreSQL engine (PGlite) with filesystem or in-memory fallback
+  // 3. Embedded PostgreSQL engine (PGlite) for local development testing only
   try {
     const { PGlite } = await import('@electric-sql/pglite');
     const dataDir = path.join(process.cwd(), 'data', 'orbit_pg');

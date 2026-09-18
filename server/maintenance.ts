@@ -1,13 +1,41 @@
 import type { Request, Response, NextFunction } from "express";
 
 /**
- * Checks whether temporary maintenance mode is enabled via server environment variable.
- * Enabled when ORBIT_MAINTENANCE_MODE is 'true', '1', 'yes', or 'on'.
+ * Checks whether maintenance mode is enabled.
+ * 
+ * Environment Separation:
+ * 1. RENDER PRODUCTION:
+ *    - Controlled by ORBIT_MAINTENANCE_MODE ('true'/'1'/'on' vs 'false'/'0'/'off').
+ *    - By default in production, if ORBIT_MAINTENANCE_MODE is not explicitly 'false',
+ *      maintenance mode is kept ENABLED to protect production while security fixes are verified.
+ * 
+ * 2. LOCAL / AI STUDIO DEVELOPMENT:
+ *    - Dev/AI Studio does NOT automatically inherit production maintenance mode,
+ *      allowing the dev server to start, serve 200 on /, and allow interactive testing.
+ *    - Development maintenance mode can be independently enabled via ORBIT_DEV_MAINTENANCE_MODE
+ *      or ORBIT_FORCE_MAINTENANCE.
  */
 export function isMaintenanceMode(): boolean {
-  const raw = process.env.ORBIT_MAINTENANCE_MODE ?? "true";
-  const val = raw.trim().toLowerCase();
-  return val !== "false" && val !== "0" && val !== "off" && val !== "no";
+  const isProd =
+    process.env.NODE_ENV === "production" ||
+    process.env.RENDER === "true" ||
+    Boolean(process.env.RENDER_SERVICE_ID) ||
+    Boolean(process.env.RENDER_INSTANCE_ID) ||
+    (typeof __filename !== "undefined" && __filename.endsWith(".cjs"));
+
+  if (isProd) {
+    const prodVal = (process.env.ORBIT_MAINTENANCE_MODE || "").trim().toLowerCase();
+    // In production, explicitly false/0/off disables maintenance
+    if (prodVal === "false" || prodVal === "0" || prodVal === "no" || prodVal === "off") {
+      return false;
+    }
+    // In production, 'true'/'1'/'on' or default keeps maintenance ENABLED
+    return true;
+  }
+
+  // Development / AI Studio environment:
+  const devVal = (process.env.ORBIT_DEV_MAINTENANCE_MODE || process.env.ORBIT_FORCE_MAINTENANCE || "").trim().toLowerCase();
+  return devVal === "true" || devVal === "1" || devVal === "yes" || devVal === "on";
 }
 
 /**

@@ -25,36 +25,62 @@ function getGeminiClient(): GoogleGenAI | null {
 // Utility to clean JSON from LLM text
 export function extractCleanJson(text: string): any {
   if (!text) throw new Error("Empty text");
+
+  function cleanJsonText(raw: string): string {
+    return raw
+      .replace(/^[\s\S]*?```(?:json)?\s*/i, "")
+      .replace(/\s*```[\s\S]*$/, "")
+      .replace(/,\s*([}\]])/g, "$1") // Strip trailing commas
+      .trim();
+  }
+
+  // 1. Try direct parse
   try {
     return JSON.parse(text);
-  } catch {
-    // Check markdown code blocks
-    const match = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
-    if (match && match[1]) {
-      try {
-        return JSON.parse(match[1].trim());
-      } catch {}
-    }
-    // Check greedy braces
-    const firstBrace = text.indexOf("{");
-    const lastBrace = text.lastIndexOf("}");
-    if (firstBrace !== -1 && lastBrace > firstBrace) {
-      const slice = text.substring(firstBrace, lastBrace + 1);
-      try {
-        return JSON.parse(slice);
-      } catch {}
-    }
-    // Check greedy brackets for arrays
-    const firstBracket = text.indexOf("[");
-    const lastBracket = text.lastIndexOf("]");
-    if (firstBracket !== -1 && lastBracket > firstBracket) {
-      const slice = text.substring(firstBracket, lastBracket + 1);
-      try {
-        return JSON.parse(slice);
-      } catch {}
-    }
-    throw new Error("Could not parse valid JSON from AI output");
+  } catch {}
+
+  // 2. Try cleaned direct text
+  try {
+    return JSON.parse(cleanJsonText(text));
+  } catch {}
+
+  // 3. Check markdown code blocks
+  const match = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  if (match && match[1]) {
+    try {
+      return JSON.parse(cleanJsonText(match[1]));
+    } catch {}
   }
+
+  // 4. Check greedy braces
+  const firstBrace = text.indexOf("{");
+  const lastBrace = text.lastIndexOf("}");
+  if (firstBrace !== -1 && lastBrace > firstBrace) {
+    const slice = text.substring(firstBrace, lastBrace + 1);
+    try {
+      return JSON.parse(slice);
+    } catch {
+      try {
+        return JSON.parse(cleanJsonText(slice));
+      } catch {}
+    }
+  }
+
+  // 5. Check greedy brackets for arrays
+  const firstBracket = text.indexOf("[");
+  const lastBracket = text.lastIndexOf("]");
+  if (firstBracket !== -1 && lastBracket > firstBracket) {
+    const slice = text.substring(firstBracket, lastBracket + 1);
+    try {
+      return JSON.parse(slice);
+    } catch {
+      try {
+        return JSON.parse(cleanJsonText(slice));
+      } catch {}
+    }
+  }
+
+  throw new Error("Could not parse valid JSON from AI output");
 }
 
 // Helper to run a promise with a hard timeout
@@ -72,7 +98,7 @@ async function withTimeout<T>(promise: Promise<T>, ms: number, label: string): P
 
 /**
  * Universal Multi-Turn AI Chat Caller:
- * Priority 1: NVIDIA NIM (Primary: openai/gpt-oss-20b, Fallback: meta/llama-3.2-11b-vision-instruct)
+ * Priority 1: NVIDIA NIM (Primary: process.env.NVIDIA_MODEL or meta/llama-3.2-11b-vision-instruct, with fallback)
  * Priority 2: Google Gemini (gemini-2.5-flash)
  */
 export async function callAIChat(options: {
@@ -87,7 +113,7 @@ export async function callAIChat(options: {
     messages,
     maxTokens = 2048,
     temperature = 0.6,
-    timeoutMs = 25000,
+    timeoutMs = 35000,
   } = options;
 
   const openAIClient = getOpenAIClient();
@@ -99,44 +125,36 @@ export async function callAIChat(options: {
     ...messages.filter(m => m.content && m.content.trim().length > 0),
   ];
 
-  // 1. Try Primary NVIDIA NIM model
+  // 1. Try NVIDIA NIM models with automatic fallback
   if (openAIClient) {
-    try {
-      const completion = await withTimeout(
-        openAIClient.chat.completions.create({
-          model: PRIMARY_NVIDIA_MODEL,
-          messages: fullMessages,
-          temperature,
-          max_tokens: maxTokens,
-        }),
-        timeoutMs,
-        `NVIDIA (${PRIMARY_NVIDIA_MODEL})`
-      );
-      const text = completion.choices?.[0]?.message?.content;
-      if (text && text.trim().length > 0) return text;
-    } catch (err: any) {
-      console.warn(`[AI Engine] NVIDIA primary model (${PRIMARY_NVIDIA_MODEL}) error:`, err?.message || err);
-      lastError = err;
+    const candidateNvidiaModels = [
+      PRIMARY_NVIDIA_MODEL,
+      FALLBACK_NVIDIA_MODEL,
+    ].filter((m, idx, arr) => Boolean(m) && arr.indexOf(m) === idx);
 
-      // Try Fallback NVIDIA NIM model if primary differed
-      if (PRIMARY_NVIDIA_MODEL !== FALLBACK_NVIDIA_MODEL) {
-        try {
-          const completion = await withTimeout(
-            openAIClient.chat.completions.create({
-              model: FALLBACK_NVIDIA_MODEL,
-              messages: fullMessages,
-              temperature,
-              max_tokens: maxTokens,
-            }),
-            timeoutMs,
-            `NVIDIA fallback (${FALLBACK_NVIDIA_MODEL})`
-          );
-          const text = completion.choices?.[0]?.message?.content;
-          if (text && text.trim().length > 0) return text;
-        } catch (fbErr: any) {
-          console.warn(`[AI Engine] NVIDIA fallback model error:`, fbErr?.message || fbErr);
-          lastError = fbErr;
+    for (const modelName of candidateNvidiaModels) {
+      try {
+        const perModelTimeout = Math.min(timeoutMs, 25000);
+        console.log(`[AI Engine] Attempting NVIDIA NIM model: ${modelName} (timeout: ${perModelTimeout}ms)`);
+        const completion = await withTimeout(
+          openAIClient.chat.completions.create({
+            model: modelName,
+            messages: fullMessages,
+            temperature,
+            max_tokens: maxTokens,
+          }),
+          perModelTimeout,
+          `NVIDIA (${modelName})`
+        );
+        const text = completion.choices?.[0]?.message?.content;
+        if (text && typeof text === "string" && text.trim().length > 0) {
+          console.log(`[AI Engine] Model ${modelName} successfully responded (${text.trim().length} chars)`);
+          return text.trim();
         }
+        throw new Error(`Model ${modelName} returned empty or null content (finish_reason: ${completion.choices?.[0]?.finish_reason})`);
+      } catch (err: any) {
+        console.warn(`[AI Engine] NVIDIA NIM model (${modelName}) failed or timed out:`, err?.message || err);
+        lastError = err;
       }
     }
   }
@@ -144,13 +162,14 @@ export async function callAIChat(options: {
   // 2. Try Google Gemini
   const geminiClient = getGeminiClient();
   if (geminiClient) {
-    const geminiModels = ["gemini-3.6-flash", "gemini-flash-latest"];
+    const geminiModels = ["gemini-2.5-flash", "gemini-flash-latest"];
     const conversationText = fullMessages
       .map(m => `${m.role.toUpperCase()}: ${m.content}`)
       .join("\n\n");
 
     for (const modelName of geminiModels) {
       try {
+        console.log(`[AI Engine] Attempting Google Gemini model: ${modelName}`);
         const res = await withTimeout(
           geminiClient.models.generateContent({
             model: modelName,
@@ -165,7 +184,10 @@ export async function callAIChat(options: {
           `Google Gemini (${modelName})`
         );
         const text = res.text;
-        if (text && text.trim().length > 0) return text;
+        if (text && text.trim().length > 0) {
+          console.log(`[AI Engine] Gemini (${modelName}) successfully responded`);
+          return text.trim();
+        }
       } catch (gemErr: any) {
         console.warn(`[AI Engine] Gemini (${modelName}) error/timeout:`, gemErr?.message || gemErr);
         lastError = gemErr;
@@ -221,16 +243,30 @@ export function synthesizeRecommendationsFallback(answers: any) {
 
   const allText = `${activities} ${strengths} ${fieldOfStudy} ${curiousTopics} ${existingSkills} ${careerGoal} ${freeform}`;
 
-  // Domain signals
-  const scoreDesign = (allText.match(/design|visual|aesthetic|ui|ux|art|creative|layout|figma|canva/g) || []).length;
-  const scoreBusiness = (allText.match(/business|startup|entrepreneur|marketing|product|strategy|lead|management|commerce/g) || []).length;
-  const scoreFinance = (allText.match(/finance|invest|money|accounting|economic|valuation|spreadsheet|wealth|bank/g) || []).length;
-  const scoreMedia = (allText.match(/media|journalism|writing|story|editorial|content|publish|podcast|video/g) || []).length;
-  const scorePsychology = (allText.match(/psychology|mental|behavior|counsel|empathy|people|human|social science/g) || []).length;
-  const scoreLaw = (allText.match(/law|legal|policy|governance|justice|advocacy|ethics|regulation/g) || []).length;
-  const scoreHealth = (allText.match(/health|medicine|doctor|patient|bio|clinic|nurs|physician/g) || []).length;
-  const scoreScience = (allText.match(/science|physics|chem|robot|energy|climate|mechanic|engineer|hardware/g) || []).length;
-  const scoreTech = (allText.match(/code|software|web|app|python|javascript|program|ai|data|cyber|tech/g) || []).length;
+  // Domain signals with negative penalty checking
+  let scoreDesign = (allText.match(/design|visual|aesthetic|ui|ux|art|creative|layout|figma|canva/g) || []).length;
+  let scoreBusiness = (allText.match(/business|startup|entrepreneur|marketing|product|strategy|lead|management|commerce/g) || []).length;
+  let scoreFinance = (allText.match(/finance|invest|money|accounting|economic|valuation|spreadsheet|wealth|bank/g) || []).length;
+  let scoreMedia = (allText.match(/media|journalism|writing|story|editorial|content|publish|podcast|video/g) || []).length;
+  let scorePsychology = (allText.match(/psychology|mental|behavior|counsel|empathy|people|human|social science/g) || []).length;
+  let scoreLaw = (allText.match(/law|legal|policy|governance|justice|advocacy|ethics|regulation/g) || []).length;
+  let scoreHealth = (allText.match(/health|medicine|doctor|patient|bio|clinic|nurs|physician/g) || []).length;
+  let scoreScience = (allText.match(/science|physics|chem|robot|energy|climate|mechanic|engineer|hardware/g) || []).length;
+  let scoreTech = (allText.match(/code|software|web|app|python|javascript|program|ai|data|cyber|tech/g) || []).length;
+
+  // Penalize domains based on disliked tasks
+  if (disliked.match(/code|program|software|syntax|debug|terminal|math|equation/i)) {
+    scoreTech = -999;
+  }
+  if (disliked.match(/design|visual|aesthetic|styling|color|canva|figma|art/i)) {
+    scoreDesign = -999;
+  }
+  if (disliked.match(/cold call|pitch|quota|sales|selling/i)) {
+    scoreBusiness = Math.max(-10, scoreBusiness - 5);
+  }
+  if (disliked.match(/writing|essay|grammar|reading/i)) {
+    scoreMedia = -999;
+  }
 
   const domainScores = [
     { domain: "design", score: scoreDesign },
@@ -244,7 +280,7 @@ export function synthesizeRecommendationsFallback(answers: any) {
     { domain: "tech", score: scoreTech },
   ].sort((a, b) => b.score - a.score);
 
-  const topDomain = domainScores[0].score > 0 ? domainScores[0].domain : "general";
+  const topDomain = domainScores[0].score > 0 ? domainScores[0].domain : (scoreTech < 0 ? "design" : "general");
   const secondDomain = domainScores[1].score > 0 ? domainScores[1].domain : "general";
 
   // Build Tailored Profile
@@ -936,18 +972,24 @@ export function synthesizeRecommendationsFallback(answers: any) {
     business: ["business_pm", "business_marketing", "finance_analysis"],
     finance: ["finance_analysis", "business_pm", "data_insights"],
     media: ["media_journalism", "business_marketing", "psych_behavioral"],
-    psychology: ["psych_behavioral", "design_ux", "business_pm"],
-    law: ["law_governance", "media_journalism", "business_pm"],
+    psychology: ["psych_behavioral", "media_journalism", "health_medicine"],
+    law: ["law_governance", "media_journalism", "psych_behavioral"],
     health: ["health_medicine", "psych_behavioral", "science_sustainable"],
     science: ["science_sustainable", "health_medicine", "data_insights"],
-    tech: ["tech_frontend", "design_ux", "tech_backend"],
+    tech: ["tech_backend", "data_insights", "tech_frontend"],
     general: ["design_ux", "business_pm", "media_journalism"],
+  };
+
+  const isKeyAllowed = (key: string) => {
+    if (scoreTech < 0 && (key === "tech_frontend" || key === "tech_backend")) return false;
+    if (scoreDesign < 0 && key === "design_ux") return false;
+    return true;
   };
 
   // Add primary domain recommendations
   const primaryKeys = domainToKeys[topDomain] || domainToKeys.general;
   for (const k of primaryKeys) {
-    if (!selectedKeys.includes(k) && CATALOG[k]) {
+    if (!selectedKeys.includes(k) && CATALOG[k] && isKeyAllowed(k)) {
       selectedKeys.push(k);
     }
   }
@@ -956,17 +998,20 @@ export function synthesizeRecommendationsFallback(answers: any) {
   if (selectedKeys.length < 3 && secondDomain && secondDomain !== topDomain) {
     const secondaryKeys = domainToKeys[secondDomain] || [];
     for (const k of secondaryKeys) {
-      if (!selectedKeys.includes(k) && CATALOG[k] && selectedKeys.length < 3) {
+      if (!selectedKeys.includes(k) && CATALOG[k] && isKeyAllowed(k) && selectedKeys.length < 3) {
         selectedKeys.push(k);
       }
     }
   }
 
   // Backfill if needed
-  const fallbackPool = ["design_ux", "business_pm", "media_journalism", "finance_analysis", "tech_frontend"];
+  const fallbackPool = scoreTech < 0
+    ? ["design_ux", "business_pm", "media_journalism", "business_marketing", "psych_behavioral"]
+    : ["tech_backend", "data_insights", "tech_frontend", "business_pm", "design_ux"];
+
   for (const k of fallbackPool) {
     if (selectedKeys.length >= 3) break;
-    if (!selectedKeys.includes(k) && CATALOG[k]) {
+    if (!selectedKeys.includes(k) && CATALOG[k] && isKeyAllowed(k)) {
       selectedKeys.push(k);
     }
   }

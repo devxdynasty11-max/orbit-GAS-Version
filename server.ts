@@ -121,7 +121,7 @@ function requireAuth(req: any, res: express.Response, next: express.NextFunction
 
 // Server-side environment configuration
 const NVIDIA_API_KEY = process.env.NVIDIA_API_KEY || "";
-const NVIDIA_MODEL = process.env.NVIDIA_MODEL || "meta/llama-3.2-11b-vision-instruct";
+const NVIDIA_MODEL = process.env.NVIDIA_MODEL || "openai/gpt-oss-20b";
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
 
 // Health check route
@@ -132,7 +132,7 @@ app.get("/api/health", async (_req, res) => {
     models: {
       nvidia: NVIDIA_MODEL,
       nvidiaActive: Boolean(NVIDIA_API_KEY && NVIDIA_API_KEY.length > 5),
-      gemini: "gemini-3.6-flash",
+      gemini: "gemini-3.8-flash",
       geminiActive: Boolean(GEMINI_API_KEY && GEMINI_API_KEY.length > 5),
     },
     database: {
@@ -641,78 +641,106 @@ app.post("/api/ai/generate-recommendations", requireAuth, async (req: any, res) 
     }
 
     const prompt = `You are ORBIT's career and skill discovery guide.
-ORBIT is a truly field-agnostic platform spanning Healthcare, Business, Design, Law, Psychology, Education, Media & Journalism, Sciences, Skilled Crafts, and Technology.
-Analyze the student's authentic answers:
+Analyze the student's authentic onboarding answers:
 ${JSON.stringify(answers, null, 2)}
 
-GUIDELINES:
-- Recommend 3 diverse, genuinely fitting directions that reflect their actual interests.
-- If they prefer working with people or helping, suggest Psychology, Healthcare, Education, or People Operations.
-- If they enjoy writing, storytelling, or analysis, suggest Journalism, Content Strategy, or Policy.
-- If they enjoy visual aesthetics and layout, suggest UI/UX or Brand Design.
-- If they enjoy numbers and strategy, suggest Finance, Product Strategy, or Operations.
-- Only suggest coding/software engineering if their answers explicitly state an appetite for computer programming.
-- DO NOT default to tech or AI careers unless requested.
+STRICT PERSONALIZATION RULES (CRITICAL):
+1. Tailor the 3 recommendations directly to this specific student's profile, stated interests, learning style, and goals.
+2. STRICTLY HONOR DEALBREAKERS & AVOIDANCES:
+   - If the student dislikes or wants to avoid coding, programming, or math formulas, you MUST NOT recommend software development, coding, programming, or computer science.
+   - If the student loves design, fashion, or visual arts, recommend visual/creative disciplines (e.g., UI/UX Design, Fashion & Brand Direction, Visual Storytelling).
+   - If the student loves mathematics, programming, or computing, recommend software engineering, AI/data systems, or quantitative tech fields.
+   - If the student loves business, marketing, or entrepreneurship, recommend product strategy, growth marketing, or venture building.
+   - If the student loves writing, journalism, psychology, healthcare, or law, recommend those authentic domains.
+3. Every student MUST receive diverse, tailored recommendations that reflect their specific authentic answers. Do NOT produce generic, identical, or repetitive recommendations across different users.
+4. Keep each recommendation's text concise, engaging, and high-impact.
 
 Output strictly valid JSON with EXACTLY this schema:
 {
   "profile": {
-    "headline": "string",
-    "summary": "string",
-    "naturalStrengths": ["string"],
-    "workStyle": "string",
-    "motivation": "string",
-    "thingsToAvoid": ["string"],
-    "curiosityAreas": ["string"],
-    "startingLevel": "string"
+    "headline": "Personalized punchy headline summarizing their natural archetype",
+    "summary": "2-3 sentences reflecting their authentic answers and ambition",
+    "naturalStrengths": ["3-4 natural strengths based on their answers"],
+    "workStyle": "Their preferred work style",
+    "motivation": "What genuinely drives them",
+    "thingsToAvoid": ["Things they specifically dislike or want to avoid"],
+    "curiosityAreas": ["Key areas they want to explore"],
+    "startingLevel": "Their current self-reported starting level"
   },
   "recommendations": [
     {
       "id": "dir-1",
-      "directionName": "string",
-      "tagline": "string",
-      "simpleExplanation": "string",
-      "whyItFitsYou": "string",
-      "dayInTheLife": ["string"],
-      "beginnerSkills": ["string"],
-      "whatYouCanTryToday": "string",
-      "futureOpportunities": ["string"],
+      "directionName": "Specific, tailored career direction name",
+      "tagline": "Compelling one-line tagline",
+      "simpleExplanation": "Clear 2-sentence explanation in simple terms",
+      "whyItFitsYou": "Direct explanation of why this fits their specific onboarding answers",
+      "dayInTheLife": ["3 realistic day-to-day activities"],
+      "beginnerSkills": ["3-4 foundational skills to start with"],
+      "whatYouCanTryToday": "A practical 15-minute action they can do today",
+      "futureOpportunities": ["3 realistic future career paths or roles"],
       "challenge": {
-        "title": "string",
-        "scenario": "string",
-        "taskDescription": "string",
-        "type": "logic" or "code",
-        "starterTemplate": "string (optional, only include if type is code)",
-        "sampleGuidance": "string"
+        "title": "5-minute hands-on mini-challenge title",
+        "scenario": "A brief realistic scenario",
+        "taskDescription": "What the student actually tries in 5 minutes",
+        "type": "design",
+        "sampleGuidance": "Brief starter guidance"
       },
       "comparison": {
-        "whatIsIt": "string",
-        "whatWouldIDo": "string",
-        "creativeFactor": "string",
-        "problemSolving": "string",
-        "workingWithPeople": "string",
-        "beginnerDifficulty": "string",
-        "whatCanITryToday": "string",
-        "whoMightEnjoy": "string"
+        "whatIsIt": "Brief description of the field",
+        "whatWouldIDo": "What you would actually do daily",
+        "creativeFactor": "High / Medium / Low with brief note",
+        "problemSolving": "Type of problem solving required",
+        "workingWithPeople": "Level of collaboration",
+        "beginnerDifficulty": "Gentle / Moderate / Steep",
+        "whatCanITryToday": "Immediate small experiment",
+        "whoMightEnjoy": "Who naturally thrives here"
       }
     }
   ]
 }
-Output strictly valid JSON only without markdown fences or preamble. Exactly 3 recommendations.`;
+Output strictly valid JSON only without markdown fences or preamble. Exactly 3 diverse recommendations.`;
 
     let data: any = null;
     try {
+      console.log(`[AI Recommendations] Requesting AI model for user ${userId}...`);
       const rawText = await callAIModel({
-        systemPrompt: "You are ORBIT career discovery AI. You output strictly valid JSON matching the user's schema without preamble.",
+        systemPrompt: "You are ORBIT career discovery AI. You output strictly valid JSON matching the user's schema without preamble or markdown fences.",
         userPrompt: prompt,
         temperature: 0.3,
         maxTokens: 3000,
-        timeoutMs: 25000,
+        timeoutMs: 40000,
       });
       data = extractCleanJson(rawText);
       if (!data?.profile || !Array.isArray(data?.recommendations) || data.recommendations.length === 0) {
         throw new Error("Missing required profile or recommendations array");
       }
+
+      // Ensure fallback properties for every recommendation
+      data.recommendations = data.recommendations.slice(0, 3).map((rec: any, idx: number) => ({
+        id: rec.id || `dir-${idx + 1}`,
+        ...rec,
+        challenge: rec.challenge || {
+          title: `Hands-on mini challenge in ${rec.directionName}`,
+          scenario: `Experience a daily task in this role.`,
+          taskDescription: `Formulate a creative solution to address the prompt.`,
+          type: "logic",
+          sampleGuidance: "Focus on clarity and user benefit."
+        },
+        comparison: rec.comparison || {
+          whatIsIt: rec.simpleExplanation || rec.directionName,
+          whatWouldIDo: rec.tagline || rec.directionName,
+          creativeFactor: "Medium",
+          problemSolving: "High",
+          workingWithPeople: "Medium",
+          beginnerDifficulty: "Gentle start",
+          whatCanITryToday: rec.whatYouCanTryToday || "Explore introductory concepts",
+          whoMightEnjoy: "Curious explorers"
+        }
+      }));
+
+      console.log(`[AI Recommendations] Successfully generated 3 personalized directions for user ${userId}:`,
+        data.recommendations.map((r: any) => r.directionName)
+      );
     } catch (err: any) {
       console.warn("[AI Recommendations] Using dynamic tailored fallback:", err?.message);
       data = synthesizeRecommendationsFallback(answers);
@@ -721,6 +749,7 @@ Output strictly valid JSON only without markdown fences or preamble. Exactly 3 r
     // Persist to PostgreSQL deterministically for authenticated user
     try {
       await saveOnboardingData(userId, answers, data.profile, data.recommendations);
+      console.log(`[AI Recommendations] Saved onboarding recommendations for user ${userId} to PostgreSQL`);
     } catch (e: any) {
       console.warn("Could not persist onboarding data to PostgreSQL:", e?.message || e);
     }
@@ -862,14 +891,10 @@ Respond in plain text.`;
 });
 
 async function startServer() {
-  // Determine production mode: explicit NODE_ENV=production, Render environment, or running as bundled .cjs
+  // Determine production mode: explicit NODE_ENV=production or running as bundled .cjs
   const isProduction =
     process.env.NODE_ENV === "production" ||
-    process.env.RENDER === "true" ||
-    Boolean(process.env.RENDER_SERVICE_ID) ||
-    Boolean(process.env.RENDER_INSTANCE_ID) ||
-    (typeof __filename !== "undefined" && __filename.endsWith(".cjs")) ||
-    (!process.env.NODE_ENV && fs.existsSync(path.join(process.cwd(), "dist", "index.html")));
+    (typeof __filename !== "undefined" && __filename.endsWith(".cjs"));
 
   // Initialize PostgreSQL and run all migrations
   try {
@@ -877,6 +902,10 @@ async function startServer() {
     console.log(`[ORBIT Database] Database ready (${dbStatus.engine}). Tables: ${dbStatus.tables.length}`);
   } catch (err: any) {
     console.error("[ORBIT Database] Startup error:", err.message);
+    if (isProduction) {
+      console.error("[ORBIT Database] Production startup halted due to database initialization failure.");
+      process.exit(1);
+    }
   }
 
   if (!isProduction) {
