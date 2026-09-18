@@ -17,6 +17,7 @@ import { AIMentorChat } from './components/AIMentorChat';
 import { Footer } from './components/Footer';
 import { StartFreshModal } from './components/StartFreshModal';
 import { SettingsProfileModal } from './components/SettingsProfileModal';
+import { apiFetch } from './utils/api';
 
 const STORAGE_KEY = 'orbit_user_progress_v1';
 const USER_ID_KEY = 'orbit_user_id';
@@ -76,7 +77,7 @@ export default function App() {
 
   // Sync initial state and verify session from PostgreSQL on mount
   useEffect(() => {
-    fetch('/api/user/session/init', {
+    apiFetch('/api/user/session/init', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ userId: userId || undefined }),
@@ -154,7 +155,7 @@ export default function App() {
     addActivity('Discovered 3 personalized career & skill possibilities');
 
     // Persist to PostgreSQL
-    fetch('/api/user/onboarding', {
+    apiFetch('/api/user/onboarding', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -206,7 +207,7 @@ export default function App() {
     addActivity(`Completed practical 5-min challenge for ${rec?.directionName || 'skill'}`);
 
     // Persist reflection to PostgreSQL
-    fetch('/api/user/challenge-reflection', {
+    apiFetch('/api/user/challenge-reflection', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -223,7 +224,7 @@ export default function App() {
     let roadmapStages: RoadmapStage[] = DEFAULT_ROADMAPS[rec.id] || DEFAULT_ROADMAPS['dir-frontend'];
 
     try {
-      const res = await fetch('/api/ai/generate-roadmap', {
+      const res = await apiFetch('/api/ai/generate-roadmap', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -252,7 +253,7 @@ export default function App() {
     addActivity(`Selected direction: ${rec.directionName}`);
 
     // Persist selected path & roadmap to PostgreSQL
-    fetch('/api/user/select-path', {
+    apiFetch('/api/user/select-path', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -269,7 +270,7 @@ export default function App() {
   // 3b. Dynamic custom pathway generation for any career (Medicine, Flight, AI, Law, etc.)
   const handleGenerateCareerPathway = async (careerGoal: string): Promise<boolean> => {
     try {
-      const res = await fetch('/api/ai/generate-career-pathway', {
+      const res = await apiFetch('/api/ai/generate-career-pathway', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -323,7 +324,7 @@ export default function App() {
     }
 
     // Persist task toggle to PostgreSQL
-    fetch('/api/user/task-toggle', {
+    apiFetch('/api/user/task-toggle', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -356,7 +357,7 @@ export default function App() {
     }
 
     // Persist project toggle to PostgreSQL
-    fetch('/api/user/project-toggle', {
+    apiFetch('/api/user/project-toggle', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -438,7 +439,7 @@ export default function App() {
 
     // Call backend endpoint to safely persist to PostgreSQL
     try {
-      const res = await fetch('/api/user/start-fresh', {
+      const res = await apiFetch('/api/user/start-fresh', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ userId }),

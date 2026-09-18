@@ -7,6 +7,7 @@ import {
   RotateCcw
 } from 'lucide-react';
 import { ChatMessage, UserProgressState } from '../types';
+import { apiFetch } from '../utils/api';
 
 interface AIMentorChatProps {
   isOpen: boolean;
@@ -115,7 +116,7 @@ What would you like to explore today?`;
         pendingTasks: pendingTasks.slice(0, 3),
       };
 
-      const res = await fetch('/api/ai/chat', {
+      const res = await apiFetch('/api/ai/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

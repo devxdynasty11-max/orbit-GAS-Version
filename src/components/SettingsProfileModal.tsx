@@ -21,6 +21,7 @@ import {
   BookOpen
 } from 'lucide-react';
 import { UserProgressState, JourneyArchive, UserProfile } from '../types';
+import { apiFetch } from '../utils/api';
 
 interface SettingsProfileModalProps {
   isOpen: boolean;
@@ -83,7 +84,7 @@ export const SettingsProfileModal: React.FC<SettingsProfileModalProps> = ({
     setSaveSuccess(false);
 
     try {
-      const response = await fetch('/api/user/profile/update', {
+      const response = await apiFetch('/api/user/profile/update', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -122,7 +123,7 @@ export const SettingsProfileModal: React.FC<SettingsProfileModalProps> = ({
     setLookupError(null);
 
     try {
-      const response = await fetch('/api/user/session/lookup', {
+      const response = await apiFetch('/api/user/session/lookup', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ identifier: lookupInput.trim() }),

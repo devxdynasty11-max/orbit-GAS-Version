@@ -14,6 +14,7 @@ import {
   Settings
 } from 'lucide-react';
 import { UserProgressState } from '../types';
+import { apiFetch } from '../utils/api';
 
 interface NavbarProps {
   currentView: 'landing' | 'onboarding' | 'recommendations' | 'dashboard';
@@ -44,7 +45,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   const [mobileMenuOpen, setMobileMenuOpen] = useState<boolean>(false);
 
   useEffect(() => {
-    fetch('/api/db/status')
+    apiFetch('/api/db/status')
       .then(res => res.json())
       .then(data => setDbStatus(data))
       .catch(() => setDbStatus({ connected: false, message: 'Offline' }));

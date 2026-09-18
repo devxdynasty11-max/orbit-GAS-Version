@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 import { OnboardingAnswers, UserProfile, Recommendation } from '../types';
 import { DEFAULT_PROFILE, DEFAULT_RECOMMENDATIONS } from '../data/defaultDirections';
+import { apiFetch } from '../utils/api';
 
 interface OnboardingFlowProps {
   userId: string;
@@ -103,7 +104,7 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({
     }
 
     // Also persist directly to server
-    fetch('/api/user/onboarding/draft', {
+    apiFetch('/api/user/onboarding/draft', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -194,7 +195,7 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({
     };
 
     try {
-      const response = await fetch('/api/ai/generate-recommendations', {
+      const response = await apiFetch('/api/ai/generate-recommendations', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ userId, answers }),

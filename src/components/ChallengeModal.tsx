@@ -9,6 +9,7 @@ import {
   AlertCircle
 } from 'lucide-react';
 import { Recommendation, Challenge } from '../types';
+import { apiFetch } from '../utils/api';
 
 interface ChallengeModalProps {
   recommendation: Recommendation;
@@ -75,7 +76,7 @@ export const ChallengeModal: React.FC<ChallengeModalProps> = ({
         : customTextAnswer.trim() || selectedFixes.join(', ') || 'Completed interactive challenge.';
 
     try {
-      const res = await fetch('/api/ai/challenge-feedback', {
+      const res = await apiFetch('/api/ai/challenge-feedback', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
